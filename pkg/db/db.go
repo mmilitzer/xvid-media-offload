@@ -56,6 +56,30 @@ func (db *DB) UpsertOffloadedFile(localPath, remoteFileID string, autograph int,
 	return err
 }
 
+// GetOffloadedFile retrieves a record by local path.
+func (db *DB) GetOffloadedFile(localPath string) (remoteFileID string, autograph int, originalSize int64, offloadedAt time.Time, err error) {
+	row := db.conn.QueryRow(`
+		SELECT remote_file_id, autograph, original_size, offloaded_at_unix
+		FROM offloaded_files
+		WHERE local_path = ?
+	`, localPath)
+	var offloadedAtUnix int64
+	err = row.Scan(&remoteFileID, &autograph, &originalSize, &offloadedAtUnix)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", 0, 0, time.Time{}, fmt.Errorf("not found")
+		}
+		return "", 0, 0, time.Time{}, err
+	}
+	return remoteFileID, autograph, originalSize, time.Unix(offloadedAtUnix, 0), nil
+}
+
+// DeleteOffloadedFile removes a record by local path.
+func (db *DB) DeleteOffloadedFile(localPath string) error {
+	_, err := db.conn.Exec(`DELETE FROM offloaded_files WHERE local_path = ?`, localPath)
+	return err
+}
+
 // Close closes the database connection.
 func (db *DB) Close() error {
 	return db.conn.Close()

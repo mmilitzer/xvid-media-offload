@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
+	"golang.org/x/sys/unix"
 )
 
 func TestScanNoCandidates(t *testing.T) {
@@ -341,6 +342,156 @@ RewriteRule "^video.mp4" - [F,L,NC]
 	}
 }
 
+func TestScanAllReturnsAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createOldFile(t, filepath.Join(setDir, "video.mp4"))
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	res, err := ScanAll(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(res.Files))
+	}
+	if res.Files[0].Path != filepath.Join(setDir, "video.mp4") {
+		t.Errorf("unexpected path: %s", res.Files[0].Path)
+	}
+	if res.Files[0].HasOffloadedMarker {
+		t.Error("expected no offloaded marker")
+	}
+}
+
+func TestScanForRestoreIgnoresNonSparse(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createOldFile(t, filepath.Join(setDir, "video.mp4"))
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	res, err := ScanForRestore(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Files) != 0 {
+		t.Errorf("expected 0 restore candidates for non-sparse file, got %d", len(res.Files))
+	}
+}
+
+func TestScanForRestoreIgnoresFilesWithMarker(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run hole-punch dependent tests")
+	}
+
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	path := filepath.Join(setDir, "video.mp4")
+	createLargeOldFile(t, path)
+
+	// Punch a hole to make it sparse.
+	f, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	unix.Fallocate(int(f.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, 1024, 1024*1024)
+	f.Close()
+
+	// Create .offloaded marker.
+	createFile(t, path+".offloaded", "")
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	res, err := ScanForRestore(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Files) != 0 {
+		t.Errorf("expected 0 restore candidates when .offloaded marker exists, got %d", len(res.Files))
+	}
+}
+
+func TestScanForRestoreFindsSparseWithoutMarker(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run hole-punch dependent tests")
+	}
+
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	path := filepath.Join(setDir, "video.mp4")
+	createLargeOldFile(t, path)
+
+	// Punch a hole to make it sparse.
+	f, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.Fallocate(int(f.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, 1024, 1024*1024)
+	f.Close()
+
+	// Ensure .offloaded marker is absent.
+	os.Remove(path + ".offloaded")
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	res, err := ScanForRestore(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("expected 1 restore candidate, got %d", len(res.Files))
+	}
+	if res.Files[0].Path != path {
+		t.Errorf("unexpected path: %s", res.Files[0].Path)
+	}
+}
+
 func TestScanIntegration(t *testing.T) {
 	// Build a self-contained directory tree so we control mtimes explicitly.
 	dir := t.TempDir()
@@ -455,6 +606,30 @@ func createFile(t *testing.T, path, content string) {
 func createOldFile(t *testing.T, path string) {
 	t.Helper()
 	createFile(t, path, "old content")
+	oldTime := time.Now().Add(-720 * time.Hour)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func createLargeOldFile(t *testing.T, path string) {
+	t.Helper()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 2*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
 	oldTime := time.Now().Add(-720 * time.Hour)
 	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
 		t.Fatal(err)
