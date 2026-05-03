@@ -15,6 +15,7 @@ type Config struct {
 	MarkerDepth     int      `yaml:"marker_depth"`
 	MinimumAge      Duration `yaml:"minimum_age"`
 	KeepPrefixBytes int64    `yaml:"keep_prefix_bytes"`
+	DatabasePath    string   `yaml:"database_path"`
 	Verbose         bool     `yaml:"-"` // set from CLI flag
 }
 

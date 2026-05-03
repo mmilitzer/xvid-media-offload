@@ -15,17 +15,19 @@ var fileIDRe = regexp.MustCompile(`#file_id=([a-f0-9]+)`)
 
 // Info holds parsed information from a marker file.
 type Info struct {
-	Path        string
-	Valid       bool
-	Patterns    []string          // patterns in file order
-	FileIDByRel map[string]string // pattern -> file_id
+	Path          string
+	Valid         bool
+	Patterns      []string          // patterns in file order
+	FileIDByRel   map[string]string // pattern -> file_id
+	AutographByRel map[string]int   // pattern -> autograph (0 or 1)
 }
 
 // entry tracks a parsed pattern with its metadata.
 type entry struct {
-	pattern   string
-	fileID    string
-	autograph bool
+	pattern         string
+	fileID          string
+	autographSet    bool
+	autographValue  int
 }
 
 // Parse reads and parses a marker file, returning its Info.
@@ -41,13 +43,15 @@ func Parse(path string) (*Info, error) {
 	defer f.Close()
 
 	info := &Info{
-		Path:        path,
-		Valid:       false,
-		FileIDByRel: make(map[string]string),
+		Path:           path,
+		Valid:          false,
+		FileIDByRel:    make(map[string]string),
+		AutographByRel: make(map[string]int),
 	}
 
 	var pendingRules []string
-	var blockHasAutograph bool
+	var blockAutographSet bool
+	var blockAutographValue int
 	var firstLineValid bool
 	var lineNum int
 	var entries []entry
@@ -69,7 +73,13 @@ func Parse(path string) (*Info, error) {
 		}
 
 		if strings.HasPrefix(line, "#autograph=1") {
-			blockHasAutograph = true
+			blockAutographSet = true
+			blockAutographValue = 1
+			continue
+		}
+		if strings.HasPrefix(line, "#autograph=0") {
+			blockAutographSet = true
+			blockAutographValue = 0
 			continue
 		}
 
@@ -77,13 +87,15 @@ func Parse(path string) (*Info, error) {
 			fileID := m[1]
 			for _, pattern := range pendingRules {
 				entries = append(entries, entry{
-					pattern:   pattern,
-					fileID:    fileID,
-					autograph: blockHasAutograph,
+					pattern:        pattern,
+					fileID:         fileID,
+					autographSet:   blockAutographSet,
+					autographValue: blockAutographValue,
 				})
 			}
 			pendingRules = nil
-			blockHasAutograph = false
+			blockAutographSet = false
+			blockAutographValue = 0
 			continue
 		}
 
@@ -98,7 +110,8 @@ func Parse(path string) (*Info, error) {
 
 		if strings.HasPrefix(line, "RewriteEngine") {
 			pendingRules = nil
-			blockHasAutograph = false
+			blockAutographSet = false
+			blockAutographValue = 0
 		}
 	}
 
@@ -116,6 +129,9 @@ func Parse(path string) (*Info, error) {
 		seen := make(map[string]bool)
 		for _, e := range entries {
 			info.FileIDByRel[e.pattern] = e.fileID
+			if e.autographSet {
+				info.AutographByRel[e.pattern] = e.autographValue
+			}
 			if !seen[e.pattern] {
 				seen[e.pattern] = true
 				info.Patterns = append(info.Patterns, e.pattern)
@@ -134,7 +150,7 @@ func validateLegacyMarker(entries []entry) bool {
 	}
 	hasMP4 := false
 	for _, e := range entries {
-		if !e.autograph {
+		if !e.autographSet || e.autographValue != 1 {
 			return false
 		}
 		if isMP4Pattern(e.pattern) {
@@ -156,10 +172,9 @@ func isMP4Pattern(pattern string) bool {
 	return strings.HasSuffix(strings.ToLower(s), ".mp4")
 }
 
-// MatchFileID returns the file_id for a given relative file path.
-// It iterates over patterns in reverse file order so that the last
-// occurrence in the marker file wins.
-func (info *Info) MatchFileID(relPath string) (string, bool) {
+// matchPattern finds the last pattern in file order that matches relPath and
+// returns the pattern string. If no pattern matches, it returns "" and false.
+func (info *Info) matchPattern(relPath string) (string, bool) {
 	for i := len(info.Patterns) - 1; i >= 0; i-- {
 		pattern := info.Patterns[i]
 		re, err := regexp.Compile(pattern)
@@ -167,8 +182,32 @@ func (info *Info) MatchFileID(relPath string) (string, bool) {
 			continue
 		}
 		if re.MatchString(relPath) {
-			return info.FileIDByRel[pattern], true
+			return pattern, true
 		}
 	}
 	return "", false
+}
+
+// MatchFileID returns the file_id for a given relative file path.
+// It iterates over patterns in reverse file order so that the last
+// occurrence in the marker file wins.
+func (info *Info) MatchFileID(relPath string) (string, bool) {
+	pattern, ok := info.matchPattern(relPath)
+	if !ok {
+		return "", false
+	}
+	id, ok := info.FileIDByRel[pattern]
+	return id, ok
+}
+
+// MatchAutograph returns the autograph value (0 or 1) for a given relative
+// file path. It iterates over patterns in reverse file order so that the last
+// occurrence in the marker file wins.
+func (info *Info) MatchAutograph(relPath string) (int, bool) {
+	pattern, ok := info.matchPattern(relPath)
+	if !ok {
+		return 0, false
+	}
+	val, ok := info.AutographByRel[pattern]
+	return val, ok
 }

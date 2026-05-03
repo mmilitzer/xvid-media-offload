@@ -265,3 +265,83 @@ RewriteRule "^720p/.*\.mp4$" - [F,L,NC]
 		t.Errorf("unexpected id: %s", id)
 	}
 }
+
+func TestParseAutographValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !info.Valid {
+		t.Fatal("expected marker to be valid")
+	}
+
+	val, ok := info.MatchAutograph("720p/abc.mp4")
+	if !ok {
+		t.Fatal("expected autograph match")
+	}
+	if val != 1 {
+		t.Errorf("expected autograph 1, got %d", val)
+	}
+}
+
+func TestParseAutographZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#autograph=0
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	val, ok := info.MatchAutograph("720p/abc.mp4")
+	if !ok {
+		t.Fatal("expected autograph match")
+	}
+	if val != 0 {
+		t.Errorf("expected autograph 0, got %d", val)
+	}
+}
+
+func TestParseMissingAutograph(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, ok := info.MatchAutograph("720p/abc.mp4")
+	if ok {
+		t.Error("expected no autograph match when autograph is missing")
+	}
+}

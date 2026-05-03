@@ -1,0 +1,62 @@
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+// DB wraps a SQLite connection for offloaded file records.
+type DB struct {
+	conn *sql.DB
+}
+
+// Open opens or creates the SQLite database at path and ensures the schema.
+func Open(path string) (*DB, error) {
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("opening sqlite db: %w", err)
+	}
+
+	db := &DB{conn: conn}
+	if err := db.createTable(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func (db *DB) createTable() error {
+	_, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS offloaded_files (
+			local_path TEXT PRIMARY KEY,
+			remote_file_id TEXT NOT NULL,
+			autograph INTEGER NOT NULL CHECK (autograph IN (0, 1)),
+			original_size INTEGER NOT NULL,
+			offloaded_at_unix INTEGER NOT NULL
+		)
+	`)
+	return err
+}
+
+// UpsertOffloadedFile inserts or updates a record for an offloaded file.
+func (db *DB) UpsertOffloadedFile(localPath, remoteFileID string, autograph int, originalSize int64, offloadedAt time.Time) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO offloaded_files (local_path, remote_file_id, autograph, original_size, offloaded_at_unix)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(local_path) DO UPDATE SET
+			remote_file_id = excluded.remote_file_id,
+			autograph = excluded.autograph,
+			original_size = excluded.original_size,
+			offloaded_at_unix = excluded.offloaded_at_unix
+	`, localPath, remoteFileID, autograph, originalSize, offloadedAt.Unix())
+	return err
+}
+
+// Close closes the database connection.
+func (db *DB) Close() error {
+	return db.conn.Close()
+}

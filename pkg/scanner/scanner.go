@@ -20,6 +20,7 @@ type Candidate struct {
 	ModTime    time.Time
 	Age        time.Duration
 	RemoteID   string
+	Autograph  int // -1 means not set, 0 or 1 means explicit value
 	Glob       string
 	MarkerPath string
 }
@@ -181,6 +182,10 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 			}
 
 			remoteID := mInfo.FileIDByRel[pattern]
+			autograph := -1
+			if a, ok := mInfo.MatchAutograph(relPath); ok {
+				autograph = a
+			}
 
 			res.Candidates = append(res.Candidates, Candidate{
 				Path:       absPath,
@@ -189,6 +194,7 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 				ModTime:    fileInfo.ModTime(),
 				Age:        age,
 				RemoteID:   remoteID,
+				Autograph:  autograph,
 				Glob:       matchedGlob,
 				MarkerPath: markerPath,
 			})
