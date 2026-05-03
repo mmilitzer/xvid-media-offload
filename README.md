@@ -142,6 +142,11 @@ The first milestone only needs enough config to scan and report candidates.
 
 `marker_depth` controls how many directory levels below `scan_roots` the tool looks for marker files. The default is `1` (e.g. `content/set1/.htaccess`). Use `2` for layouts like `content/group1/set1/.htaccess`.
 
+`minimum_age` accepts human-friendly durations in addition to standard Go durations:
+- Standard: `720h`, `1h30m`, `48h`
+- Extended: `30d` (days), `2w` (weeks), `6mo` (months), `1y` (years)
+- Compound: `1y 6mo`
+
 ## Candidate rules
 
 A file may be considered an offload candidate only if all of the following are true:
@@ -210,6 +215,12 @@ Initial command:
 
 ```bash
 media-offload scan --config ./config.yaml --dry-run
+```
+
+Add `--verbose` to see per-file skip reasons and detailed errors:
+
+```bash
+media-offload scan --config ./config.yaml --dry-run --verbose
 ```
 
 Future commands:

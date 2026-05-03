@@ -33,6 +33,7 @@ func runScan(args []string) int {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to config file (required)")
 	dryRun := fs.Bool("dry-run", false, "Print candidates without modifying files (required for milestone 1)")
+	verbose := fs.Bool("verbose", false, "Enable verbose output with per-file skip and error details")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		return 1
@@ -53,6 +54,7 @@ func runScan(args []string) int {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		return 1
 	}
+	cfg.Verbose = *verbose
 
 	res, err := scanner.Scan(cfg)
 	if err != nil {
@@ -60,11 +62,11 @@ func runScan(args []string) int {
 		return 1
 	}
 
-	printDryRunReport(res)
+	printDryRunReport(res, *verbose)
 	return 0
 }
 
-func printDryRunReport(res *scanner.Result) {
+func printDryRunReport(res *scanner.Result, verbose bool) {
 	fmt.Println("=== Dry-Run Scan Report ===")
 	fmt.Println()
 
@@ -83,6 +85,25 @@ func printDryRunReport(res *scanner.Result) {
 			)
 		}
 		w.Flush()
+		fmt.Println()
+	}
+
+	if verbose && len(res.SkippedDetails) > 0 {
+		fmt.Println("=== Skipped Files ===")
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "PATH\tREASON\tMARKER")
+		for _, s := range res.SkippedDetails {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", s.Path, s.Reason, s.MarkerPath)
+		}
+		w.Flush()
+		fmt.Println()
+	}
+
+	if verbose && len(res.ErrorDetails) > 0 {
+		fmt.Println("=== Errors ===")
+		for _, e := range res.ErrorDetails {
+			fmt.Println(e)
+		}
 		fmt.Println()
 	}
 

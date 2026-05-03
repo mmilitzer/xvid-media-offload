@@ -24,6 +24,13 @@ type Candidate struct {
 	MarkerPath string
 }
 
+// SkipInfo records a file that was skipped during scanning.
+type SkipInfo struct {
+	Path       string
+	MarkerPath string
+	Reason     string
+}
+
 // Result holds the outcome of a scan.
 type Result struct {
 	Candidates           []Candidate
@@ -35,6 +42,8 @@ type Result struct {
 	SkippedMissingRemote int
 	Errors               int
 	TotalCandidateSize   int64
+	SkippedDetails       []SkipInfo
+	ErrorDetails         []string
 }
 
 // Scan discovers offload candidates by looking for marker files at the
@@ -70,15 +79,29 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 	for _, dirPath := range dirs {
 		markerPath := filepath.Join(dirPath, cfg.MarkerFilename)
 
+		if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+			continue // no marker here, not an error
+		}
+
 		mInfo, err := marker.Parse(markerPath)
 		if err != nil {
 			res.Errors++
+			msg := fmt.Sprintf("marker %s: %v", markerPath, err)
+			if cfg.Verbose {
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				fmt.Fprintln(os.Stderr, msg)
+			}
 			continue
 		}
 
 		res.ManagedFolders++
 		if !mInfo.Valid {
 			res.InvalidMarkers++
+			if cfg.Verbose {
+				msg := fmt.Sprintf("marker %s: invalid marker file", markerPath)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				fmt.Fprintln(os.Stderr, msg)
+			}
 			continue
 		}
 		res.ValidMarkers++
@@ -95,6 +118,11 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 			relToRoot, err := filepath.Rel(root, filepath.Join(dirPath, filepath.FromSlash(relPath)))
 			if err != nil {
 				res.Errors++
+				msg := fmt.Sprintf("relative path error for %s: %v", filepath.Join(dirPath, relPath), err)
+				if cfg.Verbose {
+					res.ErrorDetails = append(res.ErrorDetails, msg)
+					fmt.Fprintln(os.Stderr, msg)
+				}
 				continue
 			}
 			relToRoot = filepath.ToSlash(relToRoot)
@@ -115,19 +143,40 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 			if err != nil {
 				// File listed in marker but not present on disk.
 				res.SkippedMissingRemote++
+				if cfg.Verbose {
+					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+						Path:       absPath,
+						MarkerPath: markerPath,
+						Reason:     "missing remote id (file not found on disk)",
+					})
+				}
 				continue
 			}
 
 			// Check for .offloaded sibling.
 			if _, err := os.Stat(absPath + ".offloaded"); err == nil {
 				res.SkippedOffloaded++
+				if cfg.Verbose {
+					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+						Path:       absPath,
+						MarkerPath: markerPath,
+						Reason:     "already offloaded",
+					})
+				}
 				continue
 			}
 
 			// Check minimum age.
 			age := time.Since(fileInfo.ModTime())
-			if age < cfg.MinimumAge {
+			if age < cfg.MinimumAge.Duration() {
 				res.SkippedTooYoung++
+				if cfg.Verbose {
+					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+						Path:       absPath,
+						MarkerPath: markerPath,
+						Reason:     "too young",
+					})
+				}
 				continue
 			}
 

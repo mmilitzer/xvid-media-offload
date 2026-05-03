@@ -3,19 +3,19 @@ package config
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config holds the application configuration.
 type Config struct {
-	ScanRoots       []string      `yaml:"scan_roots"`
-	CandidateGlobs  []string      `yaml:"candidate_globs"`
-	MarkerFilename  string        `yaml:"marker_filename"`
-	MarkerDepth     int           `yaml:"marker_depth"`
-	MinimumAge      time.Duration `yaml:"minimum_age"`
-	KeepPrefixBytes int64         `yaml:"keep_prefix_bytes"`
+	ScanRoots       []string `yaml:"scan_roots"`
+	CandidateGlobs  []string `yaml:"candidate_globs"`
+	MarkerFilename  string   `yaml:"marker_filename"`
+	MarkerDepth     int      `yaml:"marker_depth"`
+	MinimumAge      Duration `yaml:"minimum_age"`
+	KeepPrefixBytes int64    `yaml:"keep_prefix_bytes"`
+	Verbose         bool     `yaml:"-"` // set from CLI flag
 }
 
 // Load reads and parses a YAML configuration file.
@@ -54,7 +54,7 @@ func (c *Config) Validate() error {
 	if c.MarkerDepth == 0 {
 		c.MarkerDepth = 1
 	}
-	if c.MinimumAge <= 0 {
+	if c.MinimumAge.Duration() <= 0 {
 		return fmt.Errorf("config validation failed: minimum_age must be a positive duration")
 	}
 	if c.KeepPrefixBytes <= 0 {

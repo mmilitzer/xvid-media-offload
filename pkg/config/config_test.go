@@ -38,11 +38,62 @@ keep_prefix_bytes: 52428800
 	if cfg.MarkerFilename != ".htaccess" {
 		t.Errorf("expected .htaccess, got %s", cfg.MarkerFilename)
 	}
-	if cfg.MinimumAge != 720*time.Hour {
+	if cfg.MinimumAge.Duration() != 720*time.Hour {
 		t.Errorf("expected 720h, got %v", cfg.MinimumAge)
 	}
 	if cfg.KeepPrefixBytes != 52428800 {
 		t.Errorf("expected 52428800, got %d", cfg.KeepPrefixBytes)
+	}
+}
+
+func TestLoadConfigWithDays(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+scan_roots:
+  - /tmp/scan1
+candidate_globs:
+  - "**/*.mp4"
+marker_filename: ".htaccess"
+minimum_age: "30d"
+keep_prefix_bytes: 1
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if cfg.MinimumAge.Duration() != 30*24*time.Hour {
+		t.Errorf("expected 30d, got %v", cfg.MinimumAge)
+	}
+}
+
+func TestLoadConfigWithMonthsAndYears(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+scan_roots:
+  - /tmp/scan1
+candidate_globs:
+  - "**/*.mp4"
+marker_filename: ".htaccess"
+minimum_age: "1y 6mo"
+keep_prefix_bytes: 1
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	expected := 365*24*time.Hour + 180*24*time.Hour
+	if cfg.MinimumAge.Duration() != expected {
+		t.Errorf("expected 1y6mo (%v), got %v", expected, cfg.MinimumAge)
 	}
 }
 
@@ -57,7 +108,7 @@ func TestValidateMissingScanRoots(t *testing.T) {
 	cfg := &Config{
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 	if err := cfg.Validate(); err == nil {
@@ -69,7 +120,7 @@ func TestValidateMissingCandidateGlobs(t *testing.T) {
 	cfg := &Config{
 		ScanRoots:       []string{"/tmp"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 	if err := cfg.Validate(); err == nil {
@@ -81,7 +132,7 @@ func TestValidateMissingMarkerFilename(t *testing.T) {
 	cfg := &Config{
 		ScanRoots:       []string{"/tmp"},
 		CandidateGlobs:  []string{"**/*.mp4"},
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 	if err := cfg.Validate(); err == nil {
@@ -107,7 +158,7 @@ func TestValidateInvalidKeepPrefixBytes(t *testing.T) {
 		ScanRoots:       []string{"/tmp"},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 0,
 	}
 	if err := cfg.Validate(); err == nil {
@@ -120,7 +171,7 @@ func TestValidateMarkerDepthDefault(t *testing.T) {
 		ScanRoots:       []string{"/tmp"},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 	if err := cfg.Validate(); err != nil {
@@ -137,7 +188,7 @@ func TestValidateMarkerDepthExplicit(t *testing.T) {
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
 		MarkerDepth:     2,
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 	if err := cfg.Validate(); err != nil {
@@ -154,7 +205,7 @@ func TestValidateMarkerDepthNegative(t *testing.T) {
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
 		MarkerDepth:     -1,
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 	if err := cfg.Validate(); err == nil {

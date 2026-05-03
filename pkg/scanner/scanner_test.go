@@ -15,7 +15,7 @@ func TestScanNoCandidates(t *testing.T) {
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -38,7 +38,7 @@ func TestScanSkipsNonMP4(t *testing.T) {
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -66,7 +66,7 @@ RewriteRule "^video.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      24 * time.Hour,
+		MinimumAge:      config.Duration(24 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -97,7 +97,7 @@ RewriteRule "^video.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -127,7 +127,7 @@ RewriteRule "^video.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -153,7 +153,7 @@ func TestScanIgnoresInvalidMarker(t *testing.T) {
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -183,7 +183,7 @@ RewriteRule "^video.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -217,7 +217,7 @@ RewriteRule "^720p/video.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -251,7 +251,7 @@ RewriteRule "^720p/video.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/4k/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -283,7 +283,7 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MarkerFilename:  ".htaccess",
 		MarkerDepth:     2,
-		MinimumAge:      1 * time.Hour,
+		MinimumAge:      config.Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
 
@@ -300,6 +300,44 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 	if res.ValidMarkers != 1 {
 		t.Errorf("expected 1 valid marker, got %d", res.ValidMarkers)
+	}
+}
+
+func TestScanVerboseRecordsSkipsAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createFile(t, filepath.Join(setDir, "video.mp4"), "")
+	// File is brand new -> too young.
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(24 * time.Hour),
+		KeepPrefixBytes: 1,
+		Verbose:         true,
+	}
+
+	res, err := Scan(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Candidates) != 0 {
+		t.Errorf("expected 0 candidates, got %d", len(res.Candidates))
+	}
+	if res.SkippedTooYoung != 1 {
+		t.Errorf("expected 1 too young, got %d", res.SkippedTooYoung)
+	}
+	if len(res.SkippedDetails) != 1 {
+		t.Fatalf("expected 1 skip detail, got %d", len(res.SkippedDetails))
+	}
+	if res.SkippedDetails[0].Reason != "too young" {
+		t.Errorf("unexpected reason: %s", res.SkippedDetails[0].Reason)
 	}
 }
 
@@ -357,7 +395,7 @@ RewriteRule "^4k/missing.mp4" - [F,L,NC]
 		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/4k/*.mp4"},
 		MarkerFilename:  ".htaccess",
-		MinimumAge:      720 * time.Hour,
+		MinimumAge:      config.Duration(720 * time.Hour),
 		KeepPrefixBytes: 52428800,
 	}
 
