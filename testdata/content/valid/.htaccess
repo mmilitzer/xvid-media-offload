@@ -1,0 +1,24 @@
+#Xvid AutoGraph content protection system.
+#Removing or renaming this file will disable all content protections.
+#Do not ever remove this file unless you know *exactly* what you are doing!!
+RewriteEngine on
+RewriteRule "^720p/testvideo.mp4" - [F,L,NC]
+RewriteRule "^720p/.*\.m4s$" - [F,L,NC]
+#autograph=1
+#pipeline_id=60edcc62e4b006349ae79ab9
+#file_id=669872d3d3586a56f9a3dfad
+#object_key=/testvideo/720p/testvideo.mp4
+RewriteEngine on
+RewriteRule "^1080p/testvideo.mp4" - [F,L,NC]
+RewriteRule "^1080p/.*\.m4s$" - [F,L,NC]
+#autograph=1
+#pipeline_id=60edcc62e4b006349ae79ab9
+#file_id=669872d3d3586a56f9a3dfbf
+#object_key=/testvideo/1080p/testvideo.mp4
+RewriteEngine on
+RewriteRule "^4k/testvideo.mp4" - [F,L,NC]
+RewriteRule "^4k/.*\.m4s$" - [F,L,NC]
+#autograph=1
+#pipeline_id=60edcc62e4b006349ae79ab9
+#file_id=669872d3d3586a56f9a3dfc0
+#object_key=/testvideo/4k/testvideo.mp4

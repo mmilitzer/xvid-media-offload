@@ -123,14 +123,21 @@ scan_roots:
 candidate_globs:
   - "**/4k/*.mp4"
 
-marker_filename: ".htaccess"
+minimum_age: "30d"
+```
 
-minimum_age: "720h"
+Optional fields with defaults:
 
-keep_prefix_bytes: 52428800
+```yaml
+marker_filename: ".htaccess"      # default: ".htaccess"
+marker_depth: 1                    # default: 1
+keep_prefix_bytes: 52428800        # default: 50 MB
+```
 
+Future fields (not yet used):
+
+```yaml
 scan_interval: "24h"
-
 restore_workers: 4
 
 # Optional, for later milestones only.
@@ -138,6 +145,13 @@ database_path: "/var/lib/media-offload/media-offload.db"
 ```
 
 The first milestone only needs enough config to scan and report candidates.
+
+`marker_depth` controls how many directory levels below `scan_roots` the tool looks for marker files. The default is `1` (e.g. `content/set1/.htaccess`). Use `2` for layouts like `content/group1/set1/.htaccess`.
+
+`minimum_age` accepts human-friendly durations in addition to standard Go durations:
+- Standard: `720h`, `1h30m`, `48h`
+- Extended: `30d` (days), `2w` (weeks), `6mo` (months), `1y` (years)
+- Compound: `1y 6mo`
 
 ## Candidate rules
 
@@ -209,6 +223,12 @@ Initial command:
 media-offload scan --config ./config.yaml --dry-run
 ```
 
+Add `--verbose` to see per-file skip reasons and detailed errors:
+
+```bash
+media-offload scan --config ./config.yaml --dry-run --verbose
+```
+
 Future commands:
 
 ```bash
@@ -249,3 +269,14 @@ Add periodic scans, inotify watches, config reload, worker pools, logging, and s
 - Prefer filesystem reality over cached state.
 - Keep restore and offload operations atomic where possible.
 - Be conservative when disk space is low.
+
+## CI and downloadable artifacts
+
+A GitHub Actions workflow runs on every pull request and push to `main`. It executes tests, `go vet`, and builds the Linux amd64 binary with `CGO_ENABLED=0`.
+
+To download the latest built binary:
+
+1. Open the [Actions](../../actions) tab.
+2. Select the most recent **CI** workflow run.
+3. Scroll down to the **Artifacts** section.
+4. Download `media-offload-linux-amd64`.
