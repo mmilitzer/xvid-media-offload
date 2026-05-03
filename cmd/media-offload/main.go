@@ -115,7 +115,7 @@ func printDryRunReport(res *scanner.Result, verbose bool) {
 	fmt.Printf("total candidate files size: %d\n", res.TotalCandidateSize)
 	fmt.Printf("skipped already offloaded:  %d\n", res.SkippedOffloaded)
 	fmt.Printf("skipped too young:          %d\n", res.SkippedTooYoung)
-	fmt.Printf("skipped missing remote id:  %d\n", res.SkippedMissingRemote)
+	fmt.Printf("skipped file not found:     %d\n", res.SkippedMissingRemote)
 	fmt.Printf("errors:                     %d\n", res.Errors)
 
 	if len(res.Candidates) == 0 {

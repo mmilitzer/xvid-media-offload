@@ -147,7 +147,7 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
 						Path:       absPath,
 						MarkerPath: markerPath,
-						Reason:     "missing remote id (file not found on disk)",
+						Reason:     "file not found on disk",
 					})
 				}
 				continue
