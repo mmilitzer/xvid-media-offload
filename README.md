@@ -249,3 +249,14 @@ Add periodic scans, inotify watches, config reload, worker pools, logging, and s
 - Prefer filesystem reality over cached state.
 - Keep restore and offload operations atomic where possible.
 - Be conservative when disk space is low.
+
+## CI and downloadable artifacts
+
+A GitHub Actions workflow runs on every pull request and push to `main`. It executes tests, `go vet`, and builds the Linux amd64 binary with `CGO_ENABLED=0`.
+
+To download the latest built binary:
+
+1. Open the [Actions](../../actions) tab.
+2. Select the most recent **CI** workflow run.
+3. Scroll down to the **Artifacts** section.
+4. Download `media-offload-linux-amd64`.

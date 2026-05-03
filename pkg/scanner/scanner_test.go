@@ -269,7 +269,7 @@ func TestScanIntegrationWithTestdata(t *testing.T) {
 	cfg := &config.Config{
 		ScanRoots:       []string{filepath.Join(repoRoot, "testdata", "content")},
 		CandidateGlobs:  []string{"**/4k/*.mp4"},
-		MarkerFilename:  ".autograph",
+		MarkerFilename:  ".htaccess",
 		MinimumAge:      720 * time.Hour,
 		KeepPrefixBytes: 52428800,
 	}
