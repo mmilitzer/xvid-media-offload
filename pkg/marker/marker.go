@@ -21,8 +21,18 @@ type Info struct {
 	FileIDByRel map[string]string // pattern -> file_id
 }
 
+// entry tracks a parsed pattern with its metadata.
+type entry struct {
+	pattern   string
+	fileID    string
+	autograph bool
+}
+
 // Parse reads and parses a marker file, returning its Info.
-// If the first line is not valid, it returns an Info with Valid=false and no error.
+// A marker is valid if either:
+//   1) The first line is the expected Xvid AutoGraph comment, or
+//   2) The file contains at least one MP4 RewriteRule and every parsed
+//      entry has both a file_id and an #autograph=1 comment.
 func Parse(path string) (*Info, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -37,64 +47,110 @@ func Parse(path string) (*Info, error) {
 	}
 
 	var pendingRules []string
+	var blockHasAutograph bool
+	var firstLineValid bool
+	var lineNum int
+	var entries []entry
 
 	scanner := bufio.NewScanner(f)
-	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
+
 		if lineNum == 1 {
-			if line != expectedFirstLine {
-				// Invalid marker; return without error but Valid=false.
-				return info, nil
+			if line == expectedFirstLine {
+				firstLineValid = true
 			}
-			info.Valid = true
 		}
-		if !info.Valid {
+
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		if err := parseLine(line, info, &pendingRules); err != nil {
-			return nil, fmt.Errorf("marker file %s line %d: %w", path, lineNum, err)
+
+		if strings.HasPrefix(line, "#autograph=1") {
+			blockHasAutograph = true
+			continue
+		}
+
+		if m := fileIDRe.FindStringSubmatch(line); m != nil {
+			fileID := m[1]
+			for _, pattern := range pendingRules {
+				entries = append(entries, entry{
+					pattern:   pattern,
+					fileID:    fileID,
+					autograph: blockHasAutograph,
+				})
+			}
+			pendingRules = nil
+			blockHasAutograph = false
+			continue
+		}
+
+		if m := rewriteRuleRe.FindStringSubmatch(line); m != nil {
+			pattern := m[1]
+			pendingRules = append(pendingRules, pattern)
+			continue
+		}
+
+		if strings.HasPrefix(line, "RewriteEngine") {
+			pendingRules = nil
+			blockHasAutograph = false
 		}
 	}
+
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading marker file: %w", err)
 	}
+
+	if firstLineValid {
+		info.Valid = true
+	} else {
+		info.Valid = validateLegacyMarker(entries)
+	}
+
+	if info.Valid {
+		seen := make(map[string]bool)
+		for _, e := range entries {
+			info.FileIDByRel[e.pattern] = e.fileID
+			if !seen[e.pattern] {
+				seen[e.pattern] = true
+				info.Patterns = append(info.Patterns, e.pattern)
+			}
+		}
+	}
+
 	return info, nil
 }
 
-func parseLine(line string, info *Info, pendingRules *[]string) error {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return nil
+// validateLegacyMarker checks whether a marker without the expected first
+// line is still valid under the legacy rules.
+func validateLegacyMarker(entries []entry) bool {
+	if len(entries) == 0 {
+		return false
 	}
-
-	// Check for file_id comment.
-	if m := fileIDRe.FindStringSubmatch(line); m != nil {
-		fileID := m[1]
-		for _, pattern := range *pendingRules {
-			if _, ok := info.FileIDByRel[pattern]; !ok {
-				info.Patterns = append(info.Patterns, pattern)
-			}
-			info.FileIDByRel[pattern] = fileID
+	hasMP4 := false
+	for _, e := range entries {
+		if !e.autograph {
+			return false
 		}
-		*pendingRules = nil
-		return nil
+		if isMP4Pattern(e.pattern) {
+			hasMP4 = true
+		}
 	}
+	return hasMP4
+}
 
-	// Check for RewriteRule.
-	if m := rewriteRuleRe.FindStringSubmatch(line); m != nil {
-		pattern := m[1]
-		*pendingRules = append(*pendingRules, pattern)
-		return nil
+// isMP4Pattern checks whether a RewriteRule pattern targets an MP4 file.
+func isMP4Pattern(pattern string) bool {
+	s := pattern
+	if strings.HasPrefix(s, "^") {
+		s = s[1:]
 	}
-
-	// RewriteEngine on starts a new block; clear pending rules.
-	if strings.HasPrefix(line, "RewriteEngine") {
-		*pendingRules = nil
+	if strings.HasSuffix(s, "$") {
+		s = s[:len(s)-1]
 	}
-
-	return nil
+	return strings.HasSuffix(strings.ToLower(s), ".mp4")
 }
 
 // MatchFileID returns the file_id for a given relative file path.
