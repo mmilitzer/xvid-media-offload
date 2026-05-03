@@ -114,3 +114,50 @@ func TestValidateInvalidKeepPrefixBytes(t *testing.T) {
 		t.Fatal("expected error for invalid keep_prefix_bytes")
 	}
 }
+
+func TestValidateMarkerDepthDefault(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      1 * time.Hour,
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MarkerDepth != 1 {
+		t.Errorf("expected default marker_depth 1, got %d", cfg.MarkerDepth)
+	}
+}
+
+func TestValidateMarkerDepthExplicit(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MarkerDepth:     2,
+		MinimumAge:      1 * time.Hour,
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MarkerDepth != 2 {
+		t.Errorf("expected marker_depth 2, got %d", cfg.MarkerDepth)
+	}
+}
+
+func TestValidateMarkerDepthNegative(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MarkerDepth:     -1,
+		MinimumAge:      1 * time.Hour,
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative marker_depth")
+	}
+}

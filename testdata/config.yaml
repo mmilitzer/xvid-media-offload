@@ -5,6 +5,7 @@ candidate_globs:
   - "**/4k/*.mp4"
 
 marker_filename: ".htaccess"
+marker_depth: 1
 
 minimum_age: "720h"
 

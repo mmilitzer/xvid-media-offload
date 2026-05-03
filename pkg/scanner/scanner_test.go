@@ -267,6 +267,42 @@ RewriteRule "^720p/video.mp4" - [F,L,NC]
 	}
 }
 
+func TestScanDepthTwo(t *testing.T) {
+	dir := t.TempDir()
+	// Depth-2 layout: scan_root/group1/set1/.htaccess
+	setDir := filepath.Join(dir, "group1", "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createOldFile(t, filepath.Join(setDir, "4k", "video.mp4"))
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MarkerDepth:     2,
+		MinimumAge:      1 * time.Hour,
+		KeepPrefixBytes: 1,
+	}
+
+	res, err := Scan(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(res.Candidates))
+	}
+	c := res.Candidates[0]
+	if c.RemoteID != "669872d3d3586a56f9a3dfad" {
+		t.Errorf("unexpected remote id: %s", c.RemoteID)
+	}
+	if res.ValidMarkers != 1 {
+		t.Errorf("expected 1 valid marker, got %d", res.ValidMarkers)
+	}
+}
+
 func TestScanIntegration(t *testing.T) {
 	// Build a self-contained directory tree so we control mtimes explicitly.
 	dir := t.TempDir()

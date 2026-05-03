@@ -37,10 +37,15 @@ type Result struct {
 	TotalCandidateSize   int64
 }
 
-// Scan discovers offload candidates by looking for marker files one level
-// below each scan root, deriving candidate file paths directly from the
-// marker's RewriteRule patterns, and checking those specific files.
+// Scan discovers offload candidates by looking for marker files at the
+// configured depth below each scan root, deriving candidate file paths
+// directly from the marker's RewriteRule patterns, and checking those
+// specific files.
 func Scan(cfg *config.Config) (*Result, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	res := &Result{
 		Candidates: make([]Candidate, 0),
 	}
@@ -57,17 +62,12 @@ func Scan(cfg *config.Config) (*Result, error) {
 func scanRoot(root string, cfg *config.Config, res *Result) error {
 	root = filepath.Clean(root)
 
-	entries, err := os.ReadDir(root)
+	dirs, err := dirsAtDepth(root, cfg.MarkerDepth)
 	if err != nil {
-		return fmt.Errorf("reading scan root %s: %w", root, err)
+		return fmt.Errorf("listing directories at depth %d under %s: %w", cfg.MarkerDepth, root, err)
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		dirPath := filepath.Join(root, entry.Name())
+	for _, dirPath := range dirs {
 		markerPath := filepath.Join(dirPath, cfg.MarkerFilename)
 
 		mInfo, err := marker.Parse(markerPath)
@@ -92,7 +92,12 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 			}
 
 			// Check candidate globs against the path relative to the scan root.
-			relToRoot := filepath.ToSlash(filepath.Join(entry.Name(), relPath))
+			relToRoot, err := filepath.Rel(root, filepath.Join(dirPath, filepath.FromSlash(relPath)))
+			if err != nil {
+				res.Errors++
+				continue
+			}
+			relToRoot = filepath.ToSlash(relToRoot)
 			matchedGlob := ""
 			for _, g := range cfg.CandidateGlobs {
 				if matched, _ := doublestar.Match(g, relToRoot); matched {
@@ -143,6 +148,42 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 	}
 
 	return nil
+}
+
+// dirsAtDepth returns all directories exactly 'depth' levels below root.
+func dirsAtDepth(root string, depth int) ([]string, error) {
+	if depth <= 0 {
+		return nil, fmt.Errorf("marker_depth must be positive")
+	}
+	if depth == 1 {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return nil, err
+		}
+		var dirs []string
+		for _, e := range entries {
+			if e.IsDir() {
+				dirs = append(dirs, filepath.Join(root, e.Name()))
+			}
+		}
+		return dirs, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		subDirs, err := dirsAtDepth(filepath.Join(root, e.Name()), depth-1)
+		if err != nil {
+			return nil, err
+		}
+		dirs = append(dirs, subDirs...)
+	}
+	return dirs, nil
 }
 
 // literalPathFromRegex extracts the literal relative path from an exact-match

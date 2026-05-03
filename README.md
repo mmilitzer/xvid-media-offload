@@ -124,6 +124,7 @@ candidate_globs:
   - "**/4k/*.mp4"
 
 marker_filename: ".htaccess"
+marker_depth: 1
 
 minimum_age: "720h"
 
@@ -138,6 +139,8 @@ database_path: "/var/lib/media-offload/media-offload.db"
 ```
 
 The first milestone only needs enough config to scan and report candidates.
+
+`marker_depth` controls how many directory levels below `scan_roots` the tool looks for marker files. The default is `1` (e.g. `content/set1/.htaccess`). Use `2` for layouts like `content/group1/set1/.htaccess`.
 
 ## Candidate rules
 

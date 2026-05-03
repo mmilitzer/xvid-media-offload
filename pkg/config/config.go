@@ -13,6 +13,7 @@ type Config struct {
 	ScanRoots       []string      `yaml:"scan_roots"`
 	CandidateGlobs  []string      `yaml:"candidate_globs"`
 	MarkerFilename  string        `yaml:"marker_filename"`
+	MarkerDepth     int           `yaml:"marker_depth"`
 	MinimumAge      time.Duration `yaml:"minimum_age"`
 	KeepPrefixBytes int64         `yaml:"keep_prefix_bytes"`
 }
@@ -46,6 +47,12 @@ func (c *Config) Validate() error {
 	}
 	if c.MarkerFilename == "" {
 		return fmt.Errorf("config validation failed: marker_filename is required")
+	}
+	if c.MarkerDepth < 0 {
+		return fmt.Errorf("config validation failed: marker_depth must be a non-negative integer")
+	}
+	if c.MarkerDepth == 0 {
+		c.MarkerDepth = 1
 	}
 	if c.MinimumAge <= 0 {
 		return fmt.Errorf("config validation failed: minimum_age must be a positive duration")
