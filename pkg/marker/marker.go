@@ -10,7 +10,7 @@ import (
 
 const expectedFirstLine = "#Xvid AutoGraph content protection system."
 
-var rewriteRuleRe = regexp.MustCompile(`RewriteRule\s+"([^"]+)"`)
+var rewriteRuleRe = regexp.MustCompile(`RewriteRule\s+(?:"([^"]+)"|(\S+))`)
 var fileIDRe = regexp.MustCompile(`#file_id=([a-f0-9]+)`)
 
 // Info holds parsed information from a marker file.
@@ -89,6 +89,9 @@ func Parse(path string) (*Info, error) {
 
 		if m := rewriteRuleRe.FindStringSubmatch(line); m != nil {
 			pattern := m[1]
+			if pattern == "" {
+				pattern = m[2]
+			}
 			pendingRules = append(pendingRules, pattern)
 			continue
 		}

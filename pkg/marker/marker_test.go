@@ -93,6 +93,44 @@ RewriteRule "^mp4x960/.*\.m4s$" - [F,L,NC]
 	}
 }
 
+func TestParseLegacyValidMarkerUnquoted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `RewriteRule ^mp4x1920/CC-2017-04-21_1920.mp4 - [F,L,NC]
+#autograph=1
+#pipeline_id=58e35b4fe4b0fd711eb07aa6
+#file_id=58f58aa5e4b099059ab9e310
+#object_key=/CC-2017-04-21/mp4x1920/CC-2017-04-21_1920.mp4
+RewriteRule ^mp4x960/CC-2017-04-21_960.mp4 - [F,L,NC]
+#autograph=1
+#pipeline_id=58e35b4fe4b0fd711eb07aa6
+#file_id=58f58aa5e4b099059ab9e311
+#object_key=/CC-2017-04-21/mp4x960/CC-2017-04-21_960.mp4
+RewriteRule ^mp4x480/CC-2017-04-21_480.mp4 - [F,L,NC]
+#autograph=1
+#pipeline_id=58e35b4fe4b0fd711eb07aa6
+#file_id=58f58aa5e4b099059ab9e312
+#object_key=/CC-2017-04-21/mp4x480/CC-2017-04-21_480.mp4
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !info.Valid {
+		t.Fatal("expected legacy marker with unquoted rules to be valid")
+	}
+	if len(info.FileIDByRel) != 3 {
+		t.Errorf("expected 3 mappings, got %d", len(info.FileIDByRel))
+	}
+	if id, ok := info.FileIDByRel["^mp4x1920/CC-2017-04-21_1920.mp4"]; !ok || id != "58f58aa5e4b099059ab9e310" {
+		t.Errorf("unexpected mapping: %v", info.FileIDByRel)
+	}
+}
+
 func TestParseLegacyInvalidWithoutAutograph(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".htaccess")
