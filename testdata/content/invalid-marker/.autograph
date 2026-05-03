@@ -1,0 +1,4 @@
+#Invalid marker file
+RewriteEngine on
+RewriteRule "^720p/testvideo.mp4" - [F,L,NC]
+#file_id=1234567890abcdef12345678

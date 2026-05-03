@@ -1,0 +1,175 @@
+package marker
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestParseValidMarker(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+#Removing or renaming this file will disable all content protections.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !info.Valid {
+		t.Fatal("expected marker to be valid")
+	}
+	if len(info.FileIDByRel) != 1 {
+		t.Errorf("expected 1 mapping, got %d", len(info.FileIDByRel))
+	}
+	if id, ok := info.FileIDByRel["^720p/abc.mp4"]; !ok || id != "669872d3d3586a56f9a3dfad" {
+		t.Errorf("unexpected mapping: %v", info.FileIDByRel)
+	}
+}
+
+func TestParseInvalidFirstLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Invalid marker
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Valid {
+		t.Fatal("expected marker to be invalid")
+	}
+	if len(info.FileIDByRel) != 0 {
+		t.Errorf("expected 0 mappings, got %d", len(info.FileIDByRel))
+	}
+}
+
+func TestParseMultipleResolutions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#file_id=111111111111111111111111
+RewriteEngine on
+RewriteRule "^1080p/abc.mp4" - [F,L,NC]
+#file_id=222222222222222222222222
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !info.Valid {
+		t.Fatal("expected marker to be valid")
+	}
+	if len(info.FileIDByRel) != 2 {
+		t.Errorf("expected 2 mappings, got %d", len(info.FileIDByRel))
+	}
+}
+
+func TestParseDuplicateEntriesLastWins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#file_id=111111111111111111111111
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#file_id=222222222222222222222222
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !info.Valid {
+		t.Fatal("expected marker to be valid")
+	}
+	id, ok := info.MatchFileID("720p/abc.mp4")
+	if !ok {
+		t.Fatal("expected match")
+	}
+	if id != "222222222222222222222222" {
+		t.Errorf("expected last file_id to win, got %s", id)
+	}
+}
+
+func TestMatchFileID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	id, ok := info.MatchFileID("720p/abc.mp4")
+	if !ok {
+		t.Fatal("expected match for 720p/abc.mp4")
+	}
+	if id != "669872d3d3586a56f9a3dfad" {
+		t.Errorf("unexpected id: %s", id)
+	}
+
+	_, ok = info.MatchFileID("720p/other.mp4")
+	if ok {
+		t.Error("expected no match for unrelated path")
+	}
+}
+
+func TestMatchFileIDWithRegex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^720p/.*\.mp4$" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	id, ok := info.MatchFileID("720p/anything.mp4")
+	if !ok {
+		t.Fatal("expected match")
+	}
+	if id != "669872d3d3586a56f9a3dfad" {
+		t.Errorf("unexpected id: %s", id)
+	}
+}
