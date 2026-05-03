@@ -172,10 +172,9 @@ func isMP4Pattern(pattern string) bool {
 	return strings.HasSuffix(strings.ToLower(s), ".mp4")
 }
 
-// MatchFileID returns the file_id for a given relative file path.
-// It iterates over patterns in reverse file order so that the last
-// occurrence in the marker file wins.
-func (info *Info) MatchFileID(relPath string) (string, bool) {
+// matchPattern finds the last pattern in file order that matches relPath and
+// returns the pattern string. If no pattern matches, it returns "" and false.
+func (info *Info) matchPattern(relPath string) (string, bool) {
 	for i := len(info.Patterns) - 1; i >= 0; i-- {
 		pattern := info.Patterns[i]
 		re, err := regexp.Compile(pattern)
@@ -183,26 +182,32 @@ func (info *Info) MatchFileID(relPath string) (string, bool) {
 			continue
 		}
 		if re.MatchString(relPath) {
-			return info.FileIDByRel[pattern], true
+			return pattern, true
 		}
 	}
 	return "", false
+}
+
+// MatchFileID returns the file_id for a given relative file path.
+// It iterates over patterns in reverse file order so that the last
+// occurrence in the marker file wins.
+func (info *Info) MatchFileID(relPath string) (string, bool) {
+	pattern, ok := info.matchPattern(relPath)
+	if !ok {
+		return "", false
+	}
+	id, ok := info.FileIDByRel[pattern]
+	return id, ok
 }
 
 // MatchAutograph returns the autograph value (0 or 1) for a given relative
 // file path. It iterates over patterns in reverse file order so that the last
 // occurrence in the marker file wins.
 func (info *Info) MatchAutograph(relPath string) (int, bool) {
-	for i := len(info.Patterns) - 1; i >= 0; i-- {
-		pattern := info.Patterns[i]
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			continue
-		}
-		if re.MatchString(relPath) {
-			val, ok := info.AutographByRel[pattern]
-			return val, ok
-		}
+	pattern, ok := info.matchPattern(relPath)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	val, ok := info.AutographByRel[pattern]
+	return val, ok
 }
