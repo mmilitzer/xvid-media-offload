@@ -218,3 +218,29 @@ func TestValidateMarkerDepthNegative(t *testing.T) {
 		t.Fatal("expected error for negative marker_depth")
 	}
 }
+
+func TestLoadConfigWithDatabasePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+scan_roots:
+  - /tmp/scan1
+candidate_globs:
+  - "**/*.mp4"
+marker_filename: ".htaccess"
+minimum_age: "720h"
+keep_prefix_bytes: 52428800
+database_path: "/var/lib/media-offload/db.db"
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if cfg.DatabasePath != "/var/lib/media-offload/db.db" {
+		t.Errorf("unexpected database_path: %s", cfg.DatabasePath)
+	}
+}
