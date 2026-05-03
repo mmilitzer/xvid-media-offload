@@ -259,15 +259,50 @@ RewriteRule "^720p/video.mp4" - [F,L,NC]
 	}
 }
 
-func TestScanIntegrationWithTestdata(t *testing.T) {
-	// This test uses the real testdata directory at the repo root.
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestScanIntegration(t *testing.T) {
+	// Build a self-contained directory tree so we control mtimes explicitly.
+	dir := t.TempDir()
+
+	// Valid managed folder with a 4k candidate, a too-young file,
+	// an offloaded file, a file missing a remote id, and a non-MP4 file.
+	validDir := filepath.Join(dir, "valid")
+	createMarker(t, validDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/testvideo.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfc0
+`)
+	oldTime := time.Now().Add(-720 * time.Hour)
+	youngTime := time.Now().Add(-1 * time.Hour)
+
+	createFile(t, filepath.Join(validDir, "4k", "testvideo.mp4"), "")
+	os.Chtimes(filepath.Join(validDir, "4k", "testvideo.mp4"), oldTime, oldTime)
+
+	createFile(t, filepath.Join(validDir, "4k", "tooyoung.mp4"), "")
+	os.Chtimes(filepath.Join(validDir, "4k", "tooyoung.mp4"), youngTime, youngTime)
+
+	createFile(t, filepath.Join(validDir, "4k", "offloaded.mp4"), "")
+	os.Chtimes(filepath.Join(validDir, "4k", "offloaded.mp4"), oldTime, oldTime)
+	createFile(t, filepath.Join(validDir, "4k", "offloaded.mp4.offloaded"), "")
+
+	createFile(t, filepath.Join(validDir, "4k", "noremote.mp4"), "")
+	os.Chtimes(filepath.Join(validDir, "4k", "noremote.mp4"), oldTime, oldTime)
+
+	createFile(t, filepath.Join(validDir, "4k", "ignore.mkv"), "")
+	os.Chtimes(filepath.Join(validDir, "4k", "ignore.mkv"), oldTime, oldTime)
+
+	// Invalid marker folder.
+	invalidDir := filepath.Join(dir, "invalid-marker")
+	createMarker(t, invalidDir, "#Invalid marker\n")
+	createFile(t, filepath.Join(invalidDir, "4k", "testvideo.mp4"), "")
+	os.Chtimes(filepath.Join(invalidDir, "4k", "testvideo.mp4"), oldTime, oldTime)
+
+	// No-marker folder.
+	noMarkerDir := filepath.Join(dir, "no-marker")
+	createFile(t, filepath.Join(noMarkerDir, "4k", "testvideo.mp4"), "")
+	os.Chtimes(filepath.Join(noMarkerDir, "4k", "testvideo.mp4"), oldTime, oldTime)
 
 	cfg := &config.Config{
-		ScanRoots:       []string{filepath.Join(repoRoot, "testdata", "content")},
+		ScanRoots:       []string{dir},
 		CandidateGlobs:  []string{"**/4k/*.mp4"},
 		MarkerFilename:  ".htaccess",
 		MinimumAge:      720 * time.Hour,
@@ -288,10 +323,6 @@ func TestScanIntegrationWithTestdata(t *testing.T) {
 		t.Errorf("unexpected remote id: %s", c.RemoteID)
 	}
 
-	// Counts from testdata:
-	// valid/.autograph -> valid
-	// invalid-marker/.autograph -> invalid
-	// no-marker -> none
 	if res.ValidMarkers != 1 {
 		t.Errorf("expected 1 valid marker, got %d", res.ValidMarkers)
 	}
@@ -311,6 +342,9 @@ func TestScanIntegrationWithTestdata(t *testing.T) {
 
 func createMarker(t *testing.T, dir, content string) {
 	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, ".htaccess")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
