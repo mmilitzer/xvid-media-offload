@@ -128,15 +128,18 @@ func TestValidateMissingCandidateGlobs(t *testing.T) {
 	}
 }
 
-func TestValidateMissingMarkerFilename(t *testing.T) {
+func TestValidateMarkerFilenameDefault(t *testing.T) {
 	cfg := &Config{
 		ScanRoots:       []string{"/tmp"},
 		CandidateGlobs:  []string{"**/*.mp4"},
 		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 1,
 	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for missing marker_filename")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MarkerFilename != ".htaccess" {
+		t.Errorf("expected default marker_filename .htaccess, got %s", cfg.MarkerFilename)
 	}
 }
 
@@ -153,7 +156,7 @@ func TestValidateInvalidMinimumAge(t *testing.T) {
 	}
 }
 
-func TestValidateInvalidKeepPrefixBytes(t *testing.T) {
+func TestValidateKeepPrefixBytesDefault(t *testing.T) {
 	cfg := &Config{
 		ScanRoots:       []string{"/tmp"},
 		CandidateGlobs:  []string{"**/*.mp4"},
@@ -161,8 +164,11 @@ func TestValidateInvalidKeepPrefixBytes(t *testing.T) {
 		MinimumAge:      Duration(1 * time.Hour),
 		KeepPrefixBytes: 0,
 	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for invalid keep_prefix_bytes")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.KeepPrefixBytes != 50*1024*1024 {
+		t.Errorf("expected default keep_prefix_bytes 52428800, got %d", cfg.KeepPrefixBytes)
 	}
 }
 

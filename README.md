@@ -123,15 +123,21 @@ scan_roots:
 candidate_globs:
   - "**/4k/*.mp4"
 
-marker_filename: ".htaccess"
-marker_depth: 1
+minimum_age: "30d"
+```
 
-minimum_age: "720h"
+Optional fields with defaults:
 
-keep_prefix_bytes: 52428800
+```yaml
+marker_filename: ".htaccess"      # default: ".htaccess"
+marker_depth: 1                    # default: 1
+keep_prefix_bytes: 52428800        # default: 50 MB
+```
 
+Future fields (not yet used):
+
+```yaml
 scan_interval: "24h"
-
 restore_workers: 4
 
 # Optional, for later milestones only.

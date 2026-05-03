@@ -37,7 +37,11 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+const defaultMarkerFilename = ".htaccess"
+const defaultKeepPrefixBytes = 50 * 1024 * 1024 // 50 MB
+
 // Validate checks that all required fields are present and valid.
+// Optional fields are set to their defaults when empty or zero.
 func (c *Config) Validate() error {
 	if len(c.ScanRoots) == 0 {
 		return fmt.Errorf("config validation failed: scan_roots is required")
@@ -46,7 +50,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config validation failed: candidate_globs is required")
 	}
 	if c.MarkerFilename == "" {
-		return fmt.Errorf("config validation failed: marker_filename is required")
+		c.MarkerFilename = defaultMarkerFilename
 	}
 	if c.MarkerDepth < 0 {
 		return fmt.Errorf("config validation failed: marker_depth must be a non-negative integer")
@@ -58,7 +62,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config validation failed: minimum_age must be a positive duration")
 	}
 	if c.KeepPrefixBytes <= 0 {
-		return fmt.Errorf("config validation failed: keep_prefix_bytes must be positive")
+		c.KeepPrefixBytes = defaultKeepPrefixBytes
 	}
 	return nil
 }
