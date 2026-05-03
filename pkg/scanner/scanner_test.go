@@ -30,8 +30,9 @@ func TestScanNoCandidates(t *testing.T) {
 
 func TestScanSkipsNonMP4(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, "#Xvid AutoGraph content protection system.\n")
-	createFile(t, filepath.Join(dir, "video.mkv"), "")
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, "#Xvid AutoGraph content protection system.\n")
+	createFile(t, filepath.Join(setDir, "video.mkv"), "")
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -52,12 +53,13 @@ func TestScanSkipsNonMP4(t *testing.T) {
 
 func TestScanSkipsTooYoung(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
 RewriteRule "^video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 `)
-	createFile(t, filepath.Join(dir, "video.mp4"), "")
+	createFile(t, filepath.Join(setDir, "video.mp4"), "")
 	// File is brand new.
 
 	cfg := &config.Config{
@@ -82,13 +84,14 @@ RewriteRule "^video.mp4" - [F,L,NC]
 
 func TestScanSkipsOffloaded(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
 RewriteRule "^video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 `)
-	createOldFile(t, filepath.Join(dir, "video.mp4"))
-	createFile(t, filepath.Join(dir, "video.mp4.offloaded"), "")
+	createOldFile(t, filepath.Join(setDir, "video.mp4"))
+	createFile(t, filepath.Join(setDir, "video.mp4.offloaded"), "")
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -112,12 +115,13 @@ RewriteRule "^video.mp4" - [F,L,NC]
 
 func TestScanSkipsMissingRemoteID(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
-RewriteRule "^other.mp4" - [F,L,NC]
+RewriteRule "^video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 `)
-	createOldFile(t, filepath.Join(dir, "video.mp4"))
+	// video.mp4 is listed in the marker but does not exist on disk.
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -141,8 +145,9 @@ RewriteRule "^other.mp4" - [F,L,NC]
 
 func TestScanIgnoresInvalidMarker(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, "#Invalid marker\n")
-	createOldFile(t, filepath.Join(dir, "video.mp4"))
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, "#Invalid marker\n")
+	createOldFile(t, filepath.Join(setDir, "video.mp4"))
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -166,12 +171,13 @@ func TestScanIgnoresInvalidMarker(t *testing.T) {
 
 func TestScanFindsCandidate(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
 RewriteRule "^video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 `)
-	createOldFile(t, filepath.Join(dir, "video.mp4"))
+	createOldFile(t, filepath.Join(setDir, "video.mp4"))
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -197,18 +203,15 @@ RewriteRule "^video.mp4" - [F,L,NC]
 	}
 }
 
-func TestScanInheritsParentMarker(t *testing.T) {
+func TestScanFindsNestedCandidate(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
-RewriteRule "^subdir/video.mp4" - [F,L,NC]
+RewriteRule "^720p/video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 `)
-	sub := filepath.Join(dir, "subdir")
-	if err := os.MkdirAll(sub, 0755); err != nil {
-		t.Fatal(err)
-	}
-	createOldFile(t, filepath.Join(sub, "video.mp4"))
+	createOldFile(t, filepath.Join(setDir, "720p", "video.mp4"))
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -225,19 +228,24 @@ RewriteRule "^subdir/video.mp4" - [F,L,NC]
 	if len(res.Candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(res.Candidates))
 	}
+	c := res.Candidates[0]
+	if c.RemoteID != "669872d3d3586a56f9a3dfad" {
+		t.Errorf("unexpected remote id: %s", c.RemoteID)
+	}
 }
 
 func TestScanGlobMatching(t *testing.T) {
 	dir := t.TempDir()
-	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
 RewriteRule "^4k/video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 RewriteRule "^720p/video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfbf
 `)
-	createOldFile(t, filepath.Join(dir, "4k", "video.mp4"))
-	createOldFile(t, filepath.Join(dir, "720p", "video.mp4"))
+	createOldFile(t, filepath.Join(setDir, "4k", "video.mp4"))
+	createOldFile(t, filepath.Join(setDir, "720p", "video.mp4"))
 
 	cfg := &config.Config{
 		ScanRoots:       []string{dir},
@@ -264,12 +272,21 @@ func TestScanIntegration(t *testing.T) {
 	dir := t.TempDir()
 
 	// Valid managed folder with a 4k candidate, a too-young file,
-	// an offloaded file, a file missing a remote id, and a non-MP4 file.
+	// an offloaded file, a missing file, and a non-MP4 file.
 	validDir := filepath.Join(dir, "valid")
 	createMarker(t, validDir, `#Xvid AutoGraph content protection system.
 RewriteEngine on
 RewriteRule "^4k/testvideo.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfc0
+RewriteEngine on
+RewriteRule "^4k/tooyoung.mp4" - [F,L,NC]
+#file_id=111111111111111111111111
+RewriteEngine on
+RewriteRule "^4k/offloaded.mp4" - [F,L,NC]
+#file_id=222222222222222222222222
+RewriteEngine on
+RewriteRule "^4k/missing.mp4" - [F,L,NC]
+#file_id=333333333333333333333333
 `)
 	oldTime := time.Now().Add(-720 * time.Hour)
 	youngTime := time.Now().Add(-1 * time.Hour)
@@ -284,8 +301,7 @@ RewriteRule "^4k/testvideo.mp4" - [F,L,NC]
 	os.Chtimes(filepath.Join(validDir, "4k", "offloaded.mp4"), oldTime, oldTime)
 	createFile(t, filepath.Join(validDir, "4k", "offloaded.mp4.offloaded"), "")
 
-	createFile(t, filepath.Join(validDir, "4k", "noremote.mp4"), "")
-	os.Chtimes(filepath.Join(validDir, "4k", "noremote.mp4"), oldTime, oldTime)
+	// missing.mp4 is listed in marker but not created on disk.
 
 	createFile(t, filepath.Join(validDir, "4k", "ignore.mkv"), "")
 	os.Chtimes(filepath.Join(validDir, "4k", "ignore.mkv"), oldTime, oldTime)
