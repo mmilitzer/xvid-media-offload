@@ -127,6 +127,66 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 }
 
+func TestShrinkDryRunSkipsSparseNotInCandidates(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	// Create a genuinely sparse file: write 1 byte then truncate to 1MB.
+	// On Linux tmpfs this yields st_blocks=1 (512 bytes) vs st_size=1MB,
+	// so sparse.IsSparse returns true without needing hole punching.
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	res, err := Run(cfg, true, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The sparse file must be counted as skipped but NOT as a candidate.
+	if res.SkippedSparse != 1 {
+		t.Errorf("expected 1 sparse skip, got %d", res.SkippedSparse)
+	}
+	if len(res.Candidates) != 0 {
+		t.Errorf("expected 0 candidates (sparse file excluded), got %d", len(res.Candidates))
+	}
+	for _, c := range res.Candidates {
+		if c.Path == path {
+			t.Errorf("sparse file %s should not appear in Candidates", path)
+		}
+	}
+}
+
 func TestShrinkSkipsInvalidMarker(t *testing.T) {
 	dir := t.TempDir()
 	setDir := filepath.Join(dir, "set1")

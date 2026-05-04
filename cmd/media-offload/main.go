@@ -11,6 +11,8 @@ import (
 
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
+	"github.com/mmilitzer/xvid-media-offload/pkg/download"
+	"github.com/mmilitzer/xvid-media-offload/pkg/restore"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
 	"github.com/mmilitzer/xvid-media-offload/pkg/shrink"
 )
@@ -21,6 +23,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  scan    Scan for offload candidates")
 		fmt.Fprintln(os.Stderr, "  shrink  Offload eligible files by punching holes")
+		fmt.Fprintln(os.Stderr, "  restore Restore offloaded files from remote storage")
 		os.Exit(1)
 	}
 
@@ -30,6 +33,8 @@ func main() {
 		os.Exit(runScan(os.Args[2:]))
 	case "shrink":
 		os.Exit(runShrink(os.Args[2:]))
+	case "restore":
+		os.Exit(runRestore(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		os.Exit(1)
@@ -287,5 +292,96 @@ func printShrinkReport(res *shrink.Result, dryRun bool, verbose bool) {
 	} else if !dryRun && len(res.Offloaded) == 0 {
 		fmt.Println()
 		fmt.Println("No files were offloaded.")
+	}
+}
+
+func runRestore(args []string) int {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to config file (required)")
+	dryRun := fs.Bool("dry-run", false, "Report candidates without downloading or modifying files")
+	verbose := fs.Bool("verbose", false, "Enable verbose output with per-file skip and error details")
+	workers := fs.Int("workers", 4, "Number of parallel restore workers")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		return 1
+	}
+
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: --config is required")
+		return 1
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		return 1
+	}
+	cfg.Verbose = *verbose
+
+	var database *db.DB
+	if cfg.DatabasePath != "" {
+		database, err = db.Open(cfg.DatabasePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+			return 1
+		}
+		defer database.Close()
+	}
+
+	downloader := &download.HTTPDownloader{}
+	res, err := restore.Run(cfg, *dryRun, *workers, database, downloader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error restoring: %v\n", err)
+		return 1
+	}
+
+	printRestoreReport(res, *dryRun, *verbose)
+	return 0
+}
+
+func printRestoreReport(res *restore.Result, dryRun bool, verbose bool) {
+	if dryRun {
+		fmt.Println("=== Dry-Run Restore Report ===")
+	} else {
+		fmt.Println("=== Restore Report ===")
+	}
+	fmt.Println()
+
+	fmt.Printf("restore candidates found: %d\n", res.Candidates)
+	fmt.Printf("jobs queued:              %d\n", res.Queued)
+	if !dryRun {
+		fmt.Printf("restored successfully:    %d\n", len(res.Restored))
+		fmt.Printf("failed:                   %d\n", res.Failed)
+	}
+	fmt.Printf("skipped no remote id:     %d\n", res.SkippedNoRemoteID)
+	if !dryRun {
+		fmt.Printf("skipped no credentials:   %d\n", res.SkippedNoCreds)
+		fmt.Printf("skipped no disk space:    %d\n", res.SkippedNoSpace)
+	}
+	fmt.Printf("errors:                   %d\n", res.Errors)
+	fmt.Println()
+
+	if !dryRun && len(res.Restored) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "PATH\tREMOTE ID\tAUTOGRAPH\tSIZE\tMARKER")
+		for _, r := range res.Restored {
+			fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n",
+				r.Path,
+				r.RemoteID,
+				r.Autograph,
+				r.Size,
+				r.MarkerPath,
+			)
+		}
+		w.Flush()
+		fmt.Println()
+	}
+
+	if verbose && len(res.ErrorDetails) > 0 {
+		fmt.Println("=== Errors ===")
+		for _, e := range res.ErrorDetails {
+			fmt.Println(e)
+		}
+		fmt.Println()
 	}
 }

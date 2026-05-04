@@ -10,9 +10,27 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/marker"
+	"github.com/mmilitzer/xvid-media-offload/pkg/sparse"
 )
 
+// FileInfo represents a managed MP4 file found during scanning.
+type FileInfo struct {
+	Path               string
+	RelPath            string
+	Size               int64
+	ModTime            time.Time
+	Age                time.Duration
+	RemoteID           string
+	Autograph          int // -1 means not set, 0 or 1 means explicit value
+	Glob               string
+	MarkerPath         string
+	ScanRoot           string
+	IsSparse           bool
+	HasOffloadedMarker bool
+}
+
 // Candidate represents a file that is eligible for offloading.
+// Deprecated: use FileInfo directly for new code.
 type Candidate struct {
 	Path       string
 	RelPath    string
@@ -47,12 +65,24 @@ type Result struct {
 	ErrorDetails         []string
 }
 
+// ScanResult holds the outcome of a generalized scan.
+type ScanResult struct {
+	Files                []FileInfo
+	ManagedFolders       int
+	ValidMarkers         int
+	InvalidMarkers       int
+	SkippedMissingRemote int
+	Errors               int
+	ErrorDetails         []string
+}
+
 // Scan discovers offload candidates by looking for marker files at the
 // configured depth below each scan root, deriving candidate file paths
 // directly from the marker's RewriteRule patterns, and checking those
 // specific files.
 func Scan(cfg *config.Config) (*Result, error) {
-	if err := cfg.Validate(); err != nil {
+	all, err := ScanAll(cfg)
+	if err != nil {
 		return nil, err
 	}
 
@@ -60,8 +90,84 @@ func Scan(cfg *config.Config) (*Result, error) {
 		Candidates: make([]Candidate, 0),
 	}
 
+	res.ManagedFolders = all.ManagedFolders
+	res.ValidMarkers = all.ValidMarkers
+	res.InvalidMarkers = all.InvalidMarkers
+	res.SkippedMissingRemote = all.SkippedMissingRemote
+	res.Errors = all.Errors
+	res.ErrorDetails = all.ErrorDetails
+
+	for _, f := range all.Files {
+		// Skip files that don't exist on disk.
+		if f.Size < 0 {
+			res.SkippedMissingRemote++
+			if cfg.Verbose {
+				res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+					Path:       f.Path,
+					MarkerPath: f.MarkerPath,
+					Reason:     "file not found on disk",
+				})
+			}
+			continue
+		}
+
+		// Skip already offloaded.
+		if f.HasOffloadedMarker {
+			res.SkippedOffloaded++
+			if cfg.Verbose {
+				res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+					Path:       f.Path,
+					MarkerPath: f.MarkerPath,
+					Reason:     "already offloaded",
+				})
+			}
+			continue
+		}
+
+		// Skip too young.
+		if f.Age < cfg.MinimumAge.Duration() {
+			res.SkippedTooYoung++
+			if cfg.Verbose {
+				res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+					Path:       f.Path,
+					MarkerPath: f.MarkerPath,
+					Reason:     "too young",
+				})
+			}
+			continue
+		}
+
+		res.Candidates = append(res.Candidates, Candidate{
+			Path:       f.Path,
+			RelPath:    f.RelPath,
+			Size:       f.Size,
+			ModTime:    f.ModTime,
+			Age:        f.Age,
+			RemoteID:   f.RemoteID,
+			Autograph:  f.Autograph,
+			Glob:       f.Glob,
+			MarkerPath: f.MarkerPath,
+		})
+		res.TotalCandidateSize += f.Size
+	}
+
+	return res, nil
+}
+
+// ScanAll performs a generalized scan and returns all managed MP4 files
+// with their full metadata, regardless of whether they are shrink or restore
+// candidates. It is the foundation for both shrink and restore modes.
+func ScanAll(cfg *config.Config) (*ScanResult, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	res := &ScanResult{
+		Files: make([]FileInfo, 0),
+	}
+
 	for _, root := range cfg.ScanRoots {
-		if err := scanRoot(root, cfg, res); err != nil {
+		if err := scanRootAll(root, cfg, res); err != nil {
 			return nil, fmt.Errorf("scanning root %s: %w", root, err)
 		}
 	}
@@ -69,7 +175,46 @@ func Scan(cfg *config.Config) (*Result, error) {
 	return res, nil
 }
 
-func scanRoot(root string, cfg *config.Config, res *Result) error {
+// ScanForRestore performs a scan and returns only files that are candidates
+// for restoration: sparse MP4 files without an .offloaded marker.
+func ScanForRestore(cfg *config.Config) (*ScanResult, error) {
+	all, err := ScanAll(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	restoreRes := &ScanResult{
+		ManagedFolders:       all.ManagedFolders,
+		ValidMarkers:         all.ValidMarkers,
+		InvalidMarkers:       all.InvalidMarkers,
+		SkippedMissingRemote: all.SkippedMissingRemote,
+		Errors:               all.Errors,
+		ErrorDetails:         all.ErrorDetails,
+		Files:                make([]FileInfo, 0),
+	}
+
+	for _, f := range all.Files {
+		// Skip files that don't exist on disk.
+		if f.Size < 0 {
+			restoreRes.SkippedMissingRemote++
+			continue
+		}
+
+		// Restore candidates must be sparse and not have an .offloaded marker.
+		if !f.IsSparse {
+			continue
+		}
+		if f.HasOffloadedMarker {
+			continue
+		}
+
+		restoreRes.Files = append(restoreRes.Files, f)
+	}
+
+	return restoreRes, nil
+}
+
+func scanRootAll(root string, cfg *config.Config, res *ScanResult) error {
 	root = filepath.Clean(root)
 
 	dirs, err := dirsAtDepth(root, cfg.MarkerDepth)
@@ -141,44 +286,20 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 			absPath := filepath.Join(dirPath, filepath.FromSlash(relPath))
 
 			fileInfo, err := os.Stat(absPath)
-			if err != nil {
-				// File listed in marker but not present on disk.
-				res.SkippedMissingRemote++
-				if cfg.Verbose {
-					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
-						Path:       absPath,
-						MarkerPath: markerPath,
-						Reason:     "file not found on disk",
-					})
-				}
-				continue
-			}
+			var size int64 = -1
+			var modTime time.Time
+			var age time.Duration
+			isSparse := false
+			hasOffloaded := false
 
-			// Check for .offloaded sibling.
-			if _, err := os.Stat(absPath + ".offloaded"); err == nil {
-				res.SkippedOffloaded++
-				if cfg.Verbose {
-					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
-						Path:       absPath,
-						MarkerPath: markerPath,
-						Reason:     "already offloaded",
-					})
+			if err == nil {
+				size = fileInfo.Size()
+				modTime = fileInfo.ModTime()
+				age = time.Since(modTime)
+				isSparse, _ = sparse.IsSparse(absPath)
+				if _, err := os.Stat(absPath + ".offloaded"); err == nil {
+					hasOffloaded = true
 				}
-				continue
-			}
-
-			// Check minimum age.
-			age := time.Since(fileInfo.ModTime())
-			if age < cfg.MinimumAge.Duration() {
-				res.SkippedTooYoung++
-				if cfg.Verbose {
-					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
-						Path:       absPath,
-						MarkerPath: markerPath,
-						Reason:     "too young",
-					})
-				}
-				continue
 			}
 
 			remoteID := mInfo.FileIDByRel[pattern]
@@ -187,18 +308,20 @@ func scanRoot(root string, cfg *config.Config, res *Result) error {
 				autograph = a
 			}
 
-			res.Candidates = append(res.Candidates, Candidate{
-				Path:       absPath,
-				RelPath:    relToRoot,
-				Size:       fileInfo.Size(),
-				ModTime:    fileInfo.ModTime(),
-				Age:        age,
-				RemoteID:   remoteID,
-				Autograph:  autograph,
-				Glob:       matchedGlob,
-				MarkerPath: markerPath,
+			res.Files = append(res.Files, FileInfo{
+				Path:               absPath,
+				RelPath:            relToRoot,
+				Size:               size,
+				ModTime:            modTime,
+				Age:                age,
+				RemoteID:           remoteID,
+				Autograph:          autograph,
+				Glob:               matchedGlob,
+				MarkerPath:         markerPath,
+				ScanRoot:           root,
+				IsSparse:           isSparse,
+				HasOffloadedMarker: hasOffloaded,
 			})
-			res.TotalCandidateSize += fileInfo.Size()
 		}
 	}
 
