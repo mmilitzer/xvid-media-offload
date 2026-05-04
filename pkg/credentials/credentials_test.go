@@ -44,6 +44,72 @@ APP_CLIENT_SECRET = "secret"
 	}
 }
 
+func TestParseWithInlineCommentQuoted(t *testing.T) {
+	content := `[xvid]
+APP_CLIENT_ID = "test-id-123"     ;<--- Put your application Client ID here
+APP_CLIENT_SECRET = "dGVzdC1zZWNyZXQ=" ;<--- Put your application Client Secret here
+`
+	path := filepath.Join(t.TempDir(), "cmsinclude.ini.php")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	creds, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.ClientID != "test-id-123" {
+		t.Errorf("unexpected client id: %s", creds.ClientID)
+	}
+	if creds.ClientSecret != "dGVzdC1zZWNyZXQ=" {
+		t.Errorf("unexpected client secret: %s", creds.ClientSecret)
+	}
+}
+
+func TestParseWithInlineCommentUnquoted(t *testing.T) {
+	content := `[xvid]
+APP_CLIENT_ID = test-id-123 ; comment
+APP_CLIENT_SECRET = dGVzdC1zZWNyZXQ= ; comment
+`
+	path := filepath.Join(t.TempDir(), "cmsinclude.ini.php")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	creds, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.ClientID != "test-id-123" {
+		t.Errorf("unexpected client id: %s", creds.ClientID)
+	}
+	if creds.ClientSecret != "dGVzdC1zZWNyZXQ=" {
+		t.Errorf("unexpected client secret: %s", creds.ClientSecret)
+	}
+}
+
+func TestParseSemicolonInsideQuotes(t *testing.T) {
+	content := `[xvid]
+APP_CLIENT_ID = "te;st-id"
+APP_CLIENT_SECRET = "dGVzd;C1zZWNyZXQ="
+`
+	path := filepath.Join(t.TempDir(), "cmsinclude.ini.php")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	creds, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.ClientID != "te;st-id" {
+		t.Errorf("unexpected client id: %s", creds.ClientID)
+	}
+	if creds.ClientSecret != "dGVzd;C1zZWNyZXQ=" {
+		t.Errorf("unexpected client secret: %s", creds.ClientSecret)
+	}
+}
+
 func TestParseMissingCredentials(t *testing.T) {
 	content := `[xvid]
 APP_CLIENT_ID = "test-id"

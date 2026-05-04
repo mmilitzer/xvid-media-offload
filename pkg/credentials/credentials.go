@@ -72,6 +72,7 @@ func Parse(path string) (*Credentials, error) {
 		}
 
 		if inXvidSection {
+			line = stripInlineComment(line)
 			key, val, ok := parseINIKeyValue(line)
 			if !ok {
 				continue
@@ -94,6 +95,20 @@ func Parse(path string) (*Credentials, error) {
 	}
 
 	return &creds, nil
+}
+
+func stripInlineComment(line string) string {
+	inQuotes := false
+	for i, r := range line {
+		if r == '"' || r == '\'' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if !inQuotes && (r == ';' || r == '#') {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 func parseINIKeyValue(line string) (key, val string, ok bool) {
