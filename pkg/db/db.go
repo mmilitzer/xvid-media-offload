@@ -80,6 +80,41 @@ func (db *DB) DeleteOffloadedFile(localPath string) error {
 	return err
 }
 
+// OffloadedRecord represents a single row from the offloaded_files table.
+type OffloadedRecord struct {
+	LocalPath     string
+	RemoteFileID  string
+	Autograph     int
+	OriginalSize  int64
+	OffloadedAt   time.Time
+}
+
+// ListAllOffloadedFiles returns all records in the offloaded_files table.
+func (db *DB) ListAllOffloadedFiles() ([]OffloadedRecord, error) {
+	rows, err := db.conn.Query(`
+		SELECT local_path, remote_file_id, autograph, original_size, offloaded_at_unix
+		FROM offloaded_files
+		ORDER BY local_path
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []OffloadedRecord
+	for rows.Next() {
+		var r OffloadedRecord
+		var offloadedAtUnix int64
+		err := rows.Scan(&r.LocalPath, &r.RemoteFileID, &r.Autograph, &r.OriginalSize, &offloadedAtUnix)
+		if err != nil {
+			return nil, err
+		}
+		r.OffloadedAt = time.Unix(offloadedAtUnix, 0)
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
 // Close closes the database connection.
 func (db *DB) Close() error {
 	return db.conn.Close()

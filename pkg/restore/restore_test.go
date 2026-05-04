@@ -1,6 +1,7 @@
 package restore
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,10 @@ type mockDownloader struct {
 }
 
 func (m *mockDownloader) Download(signedURL string, destPath string) error {
+	return m.DownloadContext(context.Background(), signedURL, destPath)
+}
+
+func (m *mockDownloader) DownloadContext(ctx context.Context, signedURL string, destPath string) error {
 	m.calls = append(m.calls, struct {
 		url  string
 		dest string
@@ -387,6 +392,77 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 	if res.Candidates != 1 {
 		t.Errorf("expected 1 candidate (minimum age ignored), got %d", res.Candidates)
+	}
+}
+
+func TestRestoreCleansStaleTempBeforeDiskCheck(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	createOldFile(t, path)
+
+	createCredentialFile(t, dir, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	// Create a stale large temp file that would make disk check fail if not cleaned.
+	staleTemp := path + ".restore.stale-uuid.tmp"
+	if err := os.WriteFile(staleTemp, make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	origScan := scanForRestore
+	scanForRestore = func(c *config.Config) (*scanner.ScanResult, error) {
+		return &scanner.ScanResult{
+			Files: []scanner.FileInfo{
+				{
+					Path:               path,
+					RelPath:            "set1/4k/video.mp4",
+					Size:               16,
+					RemoteID:           "669872d3d3586a56f9a3dfad",
+					Autograph:          1,
+					MarkerPath:         filepath.Join(setDir, ".htaccess"),
+					ScanRoot:           dir,
+					IsSparse:           true,
+					HasOffloadedMarker: false,
+				},
+			},
+		}, nil
+	}
+	defer func() { scanForRestore = origScan }()
+
+	// Mock disk check to fail if the stale temp still exists.
+	origDiskCheck := checkDiskSpace
+	checkDiskSpace = func(p string, n int64) (bool, int64, error) {
+		if _, err := os.Stat(staleTemp); err == nil {
+			return false, 0, nil
+		}
+		return true, 1024 * 1024 * 1024, nil
+	}
+	defer func() { checkDiskSpace = origDiskCheck }()
+
+	downloader := &mockDownloader{}
+	res, err := Run(cfg, false, 1, nil, downloader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Restored) != 1 {
+		t.Fatalf("expected 1 restored, got %d", len(res.Restored))
+	}
+	if _, err := os.Stat(staleTemp); !os.IsNotExist(err) {
+		t.Error("expected stale temp file to be cleaned before disk check")
 	}
 }
 

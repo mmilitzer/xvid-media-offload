@@ -8,6 +8,7 @@ import (
 
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
+	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
 )
 
 func TestShrinkDryRunDoesNotModify(t *testing.T) {
@@ -371,5 +372,60 @@ func createOldFile(t *testing.T, path string) {
 	oldTime := time.Now().Add(-720 * time.Hour)
 	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunFromAllProducesSameDryRunResults(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createOldFile(t, filepath.Join(setDir, "4k", "video.mp4"))
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	// Run via the traditional two-pass path.
+	resRun, err := Run(cfg, true, nil)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	// Run via single-pass RunFromAll.
+	all, err := scanner.ScanAll(cfg)
+	if err != nil {
+		t.Fatalf("ScanAll error: %v", err)
+	}
+	resFromAll, err := RunFromAll(cfg, true, nil, all)
+	if err != nil {
+		t.Fatalf("RunFromAll error: %v", err)
+	}
+
+	if len(resFromAll.Candidates) != len(resRun.Candidates) {
+		t.Errorf("expected %d candidates from RunFromAll, got %d", len(resRun.Candidates), len(resFromAll.Candidates))
+	}
+	if resFromAll.ManagedFolders != resRun.ManagedFolders {
+		t.Errorf("ManagedFolders mismatch: %d vs %d", resFromAll.ManagedFolders, resRun.ManagedFolders)
+	}
+	if resFromAll.ValidMarkers != resRun.ValidMarkers {
+		t.Errorf("ValidMarkers mismatch: %d vs %d", resFromAll.ValidMarkers, resRun.ValidMarkers)
+	}
+	if resFromAll.SkippedOffloaded != resRun.SkippedOffloaded {
+		t.Errorf("SkippedOffloaded mismatch: %d vs %d", resFromAll.SkippedOffloaded, resRun.SkippedOffloaded)
+	}
+	if resFromAll.SkippedTooYoung != resRun.SkippedTooYoung {
+		t.Errorf("SkippedTooYoung mismatch: %d vs %d", resFromAll.SkippedTooYoung, resRun.SkippedTooYoung)
+	}
+	if resFromAll.SkippedMissingRemote != resRun.SkippedMissingRemote {
+		t.Errorf("SkippedMissingRemote mismatch: %d vs %d", resFromAll.SkippedMissingRemote, resRun.SkippedMissingRemote)
 	}
 }

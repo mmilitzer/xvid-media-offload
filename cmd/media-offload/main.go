@@ -5,11 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
+	"github.com/mmilitzer/xvid-media-offload/pkg/daemon"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/download"
 	"github.com/mmilitzer/xvid-media-offload/pkg/restore"
@@ -24,6 +26,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  scan    Scan for offload candidates")
 		fmt.Fprintln(os.Stderr, "  shrink  Offload eligible files by punching holes")
 		fmt.Fprintln(os.Stderr, "  restore Restore offloaded files from remote storage")
+		fmt.Fprintln(os.Stderr, "  daemon  Run continuous daemon with periodic scans and inotify")
 		os.Exit(1)
 	}
 
@@ -35,6 +38,8 @@ func main() {
 		os.Exit(runShrink(os.Args[2:]))
 	case "restore":
 		os.Exit(runRestore(os.Args[2:]))
+	case "daemon":
+		os.Exit(runDaemon(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		os.Exit(1)
@@ -384,4 +389,47 @@ func printRestoreReport(res *restore.Result, dryRun bool, verbose bool) {
 		}
 		fmt.Println()
 	}
+}
+
+func runDaemon(args []string) int {
+	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to config file (required)")
+	dryRun := fs.Bool("dry-run", false, "Report planned actions without modifying files")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		return 1
+	}
+
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: --config is required")
+		return 1
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		return 1
+	}
+
+	// Default lock file to the same directory as the config file so it is
+	// writable by the unprivileged user running the daemon.
+	if cfg.LockFile == "" {
+		cfg.LockFile = filepath.Join(filepath.Dir(*configPath), "media-offload.lock")
+	}
+
+	var database *db.DB
+	if cfg.DatabasePath != "" {
+		database, err = db.Open(cfg.DatabasePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+			return 1
+		}
+	}
+
+	d := daemon.NewDaemon(cfg, *dryRun, database, &download.HTTPDownloader{})
+	if err := d.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running daemon: %v\n", err)
+		return 1
+	}
+	return 0
 }

@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,14 +14,15 @@ import (
 )
 
 const (
-	apiBaseURL     = "https://api.xvid.com"
-	signPath       = "/v1/files/downloads/"
-	defaultExpiry  = 30 * time.Minute
+	apiBaseURL    = "https://api.xvid.com"
+	signPath      = "/v1/files/downloads/"
+	defaultExpiry = 30 * time.Minute
 )
 
 // Downloader is the interface for downloading files. It can be mocked in tests.
 type Downloader interface {
 	Download(signedURL string, destPath string) error
+	DownloadContext(ctx context.Context, signedURL string, destPath string) error
 }
 
 // HTTPDownloader implements Downloader using the standard HTTP client.
@@ -30,12 +32,22 @@ type HTTPDownloader struct {
 
 // Download downloads the resource at signedURL to destPath.
 func (d *HTTPDownloader) Download(signedURL string, destPath string) error {
+	return d.DownloadContext(context.Background(), signedURL, destPath)
+}
+
+// DownloadContext downloads the resource at signedURL to destPath, respecting ctx.
+func (d *HTTPDownloader) DownloadContext(ctx context.Context, signedURL string, destPath string) error {
 	client := d.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	resp, err := client.Get(signedURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signedURL, nil)
+	if err != nil {
+		return fmt.Errorf("http request: %w", err)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("http GET: %w", err)
 	}

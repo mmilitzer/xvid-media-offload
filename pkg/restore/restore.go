@@ -1,9 +1,11 @@
 package restore
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,7 +164,12 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 	return res, nil
 }
 
-func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader download.Downloader, res *Result, mu *sync.Mutex) error {
+// RestoreOne performs a single-file restore and returns details about the restored file.
+func RestoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
+	return restoreOne(ctx, job, cfg, database, downloader)
+}
+
+func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
 	f := job.File
 
 	// Resolve remote ID and autograph again inside worker.
@@ -176,29 +183,38 @@ func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader downloa
 		}
 	}
 	if remoteID == "" {
-		return fmt.Errorf("no remote file id")
+		return RestoreInfo{}, fmt.Errorf("no remote file id")
 	}
 
 	creds := job.Credentials
 	if creds == nil {
-		return fmt.Errorf("no credentials available")
+		return RestoreInfo{}, fmt.Errorf("no credentials available")
+	}
+
+	// Clean up any stale temp files left by previous crashed or interrupted
+	// restore attempts before checking disk space.
+	baseName := filepath.Base(f.Path)
+	dir := filepath.Dir(f.Path)
+	if entries, readErr := os.ReadDir(dir); readErr == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), baseName+".restore.") && strings.HasSuffix(e.Name(), ".tmp") {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
 	}
 
 	// Check disk space.
 	enough, avail, err := checkDiskSpace(f.Path, f.Size)
 	if err != nil {
-		return fmt.Errorf("disk space check: %w", err)
+		return RestoreInfo{}, fmt.Errorf("disk space check: %w", err)
 	}
 	if !enough {
 		// Recreate .offloaded marker and skip.
 		err = os.WriteFile(f.Path+".offloaded", []byte(offloadedMarkerContent), 0644)
 		if err != nil {
-			return fmt.Errorf("not enough space (%d bytes available) and failed to recreate marker: %w", avail, err)
+			return RestoreInfo{}, fmt.Errorf("not enough space (%d bytes available) and failed to recreate marker: %w", avail, err)
 		}
-		mu.Lock()
-		res.SkippedNoSpace++
-		mu.Unlock()
-		return nil
+		return RestoreInfo{}, fmt.Errorf("not enough disk space (%d bytes available)", avail)
 	}
 
 	// Sign download URL.
@@ -208,15 +224,15 @@ func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader downloa
 	}
 	signedURL, err := signer.SignURL(remoteID, autograph == 1)
 	if err != nil {
-		return fmt.Errorf("signing URL: %w", err)
+		return RestoreInfo{}, fmt.Errorf("signing URL: %w", err)
 	}
 
 	// Download to temp file.
 	tempPath := f.Path + ".restore." + uuid.NewString() + ".tmp"
-	err = downloader.Download(signedURL, tempPath)
+	err = downloader.DownloadContext(ctx, signedURL, tempPath)
 	if err != nil {
 		os.Remove(tempPath)
-		return fmt.Errorf("download: %w", err)
+		return RestoreInfo{}, fmt.Errorf("download: %w", err)
 	}
 
 	// Verify size if known.
@@ -224,11 +240,19 @@ func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader downloa
 		fi, err := os.Stat(tempPath)
 		if err != nil {
 			os.Remove(tempPath)
-			return fmt.Errorf("stat temp file: %w", err)
+			return RestoreInfo{}, fmt.Errorf("stat temp file: %w", err)
 		}
 		if fi.Size() != f.Size {
 			os.Remove(tempPath)
-			return fmt.Errorf("size mismatch: expected %d, got %d", f.Size, fi.Size())
+			return RestoreInfo{}, fmt.Errorf("size mismatch: expected %d, got %d", f.Size, fi.Size())
+		}
+	}
+
+	// Preserve the original file's permissions on the temp file before rename.
+	if origInfo, statErr := os.Stat(f.Path); statErr == nil {
+		if chmodErr := os.Chmod(tempPath, origInfo.Mode()); chmodErr != nil {
+			os.Remove(tempPath)
+			return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
 		}
 	}
 
@@ -236,11 +260,11 @@ func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader downloa
 	err = os.Rename(tempPath, f.Path)
 	if err != nil {
 		os.Remove(tempPath)
-		return fmt.Errorf("atomic rename: %w", err)
+		return RestoreInfo{}, fmt.Errorf("atomic rename: %w", err)
 	}
 
 	// Fsync directory.
-	dir := filepath.Dir(f.Path)
+	dir = filepath.Dir(f.Path)
 	dirFile, err := os.Open(dir)
 	if err == nil {
 		unix.Fsync(int(dirFile.Fd()))
@@ -256,16 +280,29 @@ func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader downloa
 		_ = database.DeleteOffloadedFile(f.Path)
 	}
 
-	mu.Lock()
-	res.Restored = append(res.Restored, RestoreInfo{
+	return RestoreInfo{
 		Path:       f.Path,
 		RemoteID:   remoteID,
 		Autograph:  autograph,
 		Size:       f.Size,
 		MarkerPath: f.MarkerPath,
-	})
-	mu.Unlock()
+	}, nil
+}
 
+func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader download.Downloader, res *Result, mu *sync.Mutex) error {
+	info, err := restoreOne(context.Background(), job, cfg, database, downloader)
+	if err != nil {
+		if strings.Contains(err.Error(), "not enough disk space") {
+			mu.Lock()
+			res.SkippedNoSpace++
+			mu.Unlock()
+			return nil
+		}
+		return err
+	}
+	mu.Lock()
+	res.Restored = append(res.Restored, info)
+	mu.Unlock()
 	return nil
 }
 
