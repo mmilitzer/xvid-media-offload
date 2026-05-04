@@ -58,7 +58,6 @@ func Run(cfg *config.Config, dryRun bool, database *db.DB) (*Result, error) {
 	}
 
 	res := &Result{
-		Candidates:           scanRes.Candidates,
 		ManagedFolders:       scanRes.ManagedFolders,
 		ValidMarkers:         scanRes.ValidMarkers,
 		InvalidMarkers:       scanRes.InvalidMarkers,
@@ -66,7 +65,6 @@ func Run(cfg *config.Config, dryRun bool, database *db.DB) (*Result, error) {
 		SkippedTooYoung:      scanRes.SkippedTooYoung,
 		SkippedMissingRemote: scanRes.SkippedMissingRemote,
 		Errors:               scanRes.Errors,
-		TotalCandidateSize:   scanRes.TotalCandidateSize,
 		SkippedDetails:       scanRes.SkippedDetails,
 		ErrorDetails:         scanRes.ErrorDetails,
 	}
@@ -121,8 +119,11 @@ func Run(cfg *config.Config, dryRun bool, database *db.DB) (*Result, error) {
 			continue
 		}
 
+		// File passes all shrink-specific checks — it is a real candidate.
+		res.Candidates = append(res.Candidates, c)
+		res.TotalCandidateSize += c.Size
+
 		if dryRun {
-			res.TotalCandidateSize += c.Size
 			continue
 		}
 
