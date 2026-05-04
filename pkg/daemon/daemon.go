@@ -16,6 +16,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/credentials"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/download"
+	"github.com/mmilitzer/xvid-media-offload/pkg/lockfile"
 	"github.com/mmilitzer/xvid-media-offload/pkg/marker"
 	"github.com/mmilitzer/xvid-media-offload/pkg/restore"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
@@ -41,6 +42,8 @@ type Daemon struct {
 	// restoreCtx is cancelled on shutdown to abort active downloads.
 	restoreCtx    context.Context
 	restoreCancel context.CancelFunc
+
+	lock *lockfile.Lock
 
 	ticker *time.Ticker
 
@@ -84,6 +87,13 @@ func NewDaemon(cfg *config.Config, dryRun bool, database *db.DB, downloader down
 
 // Start begins the daemon and blocks until shutdown.
 func (d *Daemon) Start() error {
+	// Acquire single-instance lock before anything else.
+	lock, err := lockfile.Acquire(d.cfg.LockFile)
+	if err != nil {
+		return err
+	}
+	d.lock = lock
+
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	defer d.cancel()
 
@@ -184,6 +194,11 @@ func (d *Daemon) shutdown() {
 	// 7. Close DB.
 	if d.database != nil {
 		d.database.Close()
+	}
+
+	// 8. Release the single-instance lock.
+	if d.lock != nil {
+		_ = d.lock.Release()
 	}
 
 	log.Println("daemon stopped")

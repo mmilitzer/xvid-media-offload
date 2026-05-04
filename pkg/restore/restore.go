@@ -215,6 +215,18 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 		return RestoreInfo{}, fmt.Errorf("signing URL: %w", err)
 	}
 
+	// Before downloading, clean up any stale temp files left by previous
+	// crashed or interrupted restore attempts.
+	baseName := filepath.Base(f.Path)
+	dir := filepath.Dir(f.Path)
+	if entries, readErr := os.ReadDir(dir); readErr == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), baseName+".restore.") && strings.HasSuffix(e.Name(), ".tmp") {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+
 	// Download to temp file.
 	tempPath := f.Path + ".restore." + uuid.NewString() + ".tmp"
 	err = downloader.DownloadContext(ctx, signedURL, tempPath)
@@ -244,7 +256,7 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 	}
 
 	// Fsync directory.
-	dir := filepath.Dir(f.Path)
+	dir = filepath.Dir(f.Path)
 	dirFile, err := os.Open(dir)
 	if err == nil {
 		unix.Fsync(int(dirFile.Fd()))

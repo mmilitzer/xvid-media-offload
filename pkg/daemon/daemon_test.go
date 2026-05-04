@@ -323,6 +323,7 @@ func TestDaemonStartStop(t *testing.T) {
 		KeepPrefixBytes: 1,
 		RestoreWorkers:  1,
 		ScanInterval:    config.Duration(24 * time.Hour),
+		LockFile:        filepath.Join(t.TempDir(), "daemon.lock"),
 	}
 
 	d := NewDaemon(cfg, false, nil, nil)
@@ -484,6 +485,7 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 		KeepPrefixBytes: 1,
 		RestoreWorkers:  1,
 		ScanInterval:    config.Duration(24 * time.Hour),
+		LockFile:        filepath.Join(t.TempDir(), "daemon.lock"),
 	}
 
 	downloader := &cancellableDownloader{started: make(chan struct{})}
@@ -532,6 +534,7 @@ func TestEnqueueRestoreNoPanicAfterShutdown(t *testing.T) {
 		KeepPrefixBytes: 1,
 		RestoreWorkers:  1,
 		ScanInterval:    config.Duration(24 * time.Hour),
+		LockFile:        filepath.Join(t.TempDir(), "daemon.lock"),
 	}
 
 	d := NewDaemon(cfg, false, nil, nil)
