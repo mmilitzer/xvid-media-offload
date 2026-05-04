@@ -69,7 +69,58 @@ func Run(cfg *config.Config, dryRun bool, database *db.DB) (*Result, error) {
 		ErrorDetails:         scanRes.ErrorDetails,
 	}
 
-	for _, c := range scanRes.Candidates {
+	return processCandidates(cfg, dryRun, database, scanRes.Candidates, res)
+}
+
+// RunFromAll performs shrink processing using a pre-computed ScanAll result.
+// It derives shrink candidates from the ScanResult and applies the same
+// shrink-specific checks as Run, avoiding a second filesystem walk.
+func RunFromAll(cfg *config.Config, dryRun bool, database *db.DB, all *scanner.ScanResult) (*Result, error) {
+	var candidates []scanner.Candidate
+	var skippedOffloaded, skippedTooYoung, skippedMissingRemote int
+
+	for _, f := range all.Files {
+		if f.Size < 0 {
+			skippedMissingRemote++
+			continue
+		}
+		if f.HasOffloadedMarker {
+			skippedOffloaded++
+			continue
+		}
+		if f.Age < cfg.MinimumAge.Duration() {
+			skippedTooYoung++
+			continue
+		}
+		candidates = append(candidates, scanner.Candidate{
+			Path:       f.Path,
+			RelPath:    f.RelPath,
+			Size:       f.Size,
+			ModTime:    f.ModTime,
+			Age:        f.Age,
+			RemoteID:   f.RemoteID,
+			Autograph:  f.Autograph,
+			Glob:       f.Glob,
+			MarkerPath: f.MarkerPath,
+		})
+	}
+
+	res := &Result{
+		ManagedFolders:       all.ManagedFolders,
+		ValidMarkers:         all.ValidMarkers,
+		InvalidMarkers:       all.InvalidMarkers,
+		SkippedOffloaded:     skippedOffloaded,
+		SkippedTooYoung:      skippedTooYoung,
+		SkippedMissingRemote: skippedMissingRemote,
+		Errors:               all.Errors,
+		ErrorDetails:         all.ErrorDetails,
+	}
+
+	return processCandidates(cfg, dryRun, database, candidates, res)
+}
+
+func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candidates []scanner.Candidate, res *Result) (*Result, error) {
+	for _, c := range candidates {
 		// Skip files that are too small.
 		if c.Size <= 2*cfg.KeepPrefixBytes {
 			res.SkippedTooSmall++

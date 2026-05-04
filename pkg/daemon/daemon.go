@@ -241,63 +241,54 @@ func (d *Daemon) runRestore(job restoreJob) error {
 	return err
 }
 
-// combinedScan runs shrink and restore detection, registers inotify watches,
-// and enqueues restore jobs.
+// combinedScan performs a single filesystem walk and derives both shrink and
+// restore candidates from it, then registers inotify watches for .offloaded markers.
 func (d *Daemon) combinedScan() {
-	// Shrink pass: reuse existing shrink logic.
-	if !d.dryRun {
-		res, err := shrink.Run(d.cfg, false, d.database)
-		if err != nil {
-			log.Printf("shrink scan error: %v", err)
-		} else if len(res.Offloaded) > 0 {
-			log.Printf("shrink offloaded %d files", len(res.Offloaded))
-		}
-	} else {
-		res, err := shrink.Run(d.cfg, true, d.database)
-		if err != nil {
-			log.Printf("shrink scan error: %v", err)
-		} else if len(res.Candidates) > 0 {
-			log.Printf("dry-run: would shrink %d files", len(res.Candidates))
-		}
-	}
-
-	// Restore pass: find sparse files without .offloaded markers.
-	scanRes, err := scanner.ScanForRestore(d.cfg)
-	if err != nil {
-		log.Printf("restore scan error: %v", err)
-		return
-	}
-
-	if len(scanRes.Files) > 0 {
-		log.Printf("restore scan found %d candidates", len(scanRes.Files))
-	}
-
-	for _, f := range scanRes.Files {
-		job := restoreJob{
-			Path:       f.Path,
-			RemoteID:   f.RemoteID,
-			Autograph:  f.Autograph,
-			Size:       f.Size,
-			MarkerPath: f.MarkerPath,
-			ScanRoot:   f.ScanRoot,
-		}
-		d.enqueueRestore(job)
-	}
-
-	// Inotify: register watches on parent dirs of .offloaded markers.
 	all, err := scanner.ScanAll(d.cfg)
 	if err != nil {
-		log.Printf("inotify scan error: %v", err)
+		log.Printf("combined scan error: %v", err)
 		return
 	}
 
+	// Shrink processing from the same ScanAll result.
+	shrinkRes, err := shrink.RunFromAll(d.cfg, d.dryRun, d.database, all)
+	if err != nil {
+		log.Printf("shrink error: %v", err)
+	} else if !d.dryRun && len(shrinkRes.Offloaded) > 0 {
+		log.Printf("shrink offloaded %d files", len(shrinkRes.Offloaded))
+	} else if d.dryRun && len(shrinkRes.Candidates) > 0 {
+		log.Printf("dry-run: would shrink %d files", len(shrinkRes.Candidates))
+	}
+
+	// Restore candidates and inotify watches derived from the same ScanAll result.
+	restoreCount := 0
 	for _, f := range all.Files {
+		if f.Size < 0 {
+			continue
+		}
 		if f.HasOffloadedMarker {
 			dir := filepath.Dir(f.Path)
 			if err := d.addInotifyWatch(dir); err != nil {
 				log.Printf("inotify watch error for %s: %v", dir, err)
 			}
+			continue
 		}
+		if f.IsSparse {
+			restoreCount++
+			job := restoreJob{
+				Path:       f.Path,
+				RemoteID:   f.RemoteID,
+				Autograph:  f.Autograph,
+				Size:       f.Size,
+				MarkerPath: f.MarkerPath,
+				ScanRoot:   f.ScanRoot,
+			}
+			d.enqueueRestore(job)
+		}
+	}
+
+	if restoreCount > 0 {
+		log.Printf("restore scan found %d candidates", restoreCount)
 	}
 }
 
