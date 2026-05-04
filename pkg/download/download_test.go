@@ -53,6 +53,25 @@ func TestSignURLWithExpertMode(t *testing.T) {
 	}
 }
 
+func TestSignURLWithURLSafeBase64Secret(t *testing.T) {
+	// URL-safe base64: replaces + with - and / with _, omits padding.
+	raw := []byte("my-secret-key")
+	urlSafeSecret := base64.RawURLEncoding.EncodeToString(raw)
+
+	signer := &Signer{
+		ClientID:     "test-client-id",
+		ClientSecret: urlSafeSecret,
+	}
+
+	signedURL, err := signer.SignURL("file123", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(signedURL, "signature=") {
+		t.Error("expected signature parameter")
+	}
+}
+
 func TestSignURLEmptyCredentials(t *testing.T) {
 	signer := &Signer{}
 	_, err := signer.SignURL("file123", false)

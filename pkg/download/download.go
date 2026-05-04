@@ -83,7 +83,7 @@ func (s *Signer) SignURL(fileID string, autograph bool) (string, error) {
 	expires := time.Now().Add(defaultExpiry).Unix()
 	url += "&client_id=" + s.ClientID + "&expiry_time=" + strconv.FormatInt(expires, 10)
 
-	key, err := base64.StdEncoding.DecodeString(s.ClientSecret)
+	key, err := decodeClientSecret(s.ClientSecret)
 	if err != nil {
 		return "", fmt.Errorf("decoding client_secret: %w", err)
 	}
@@ -94,4 +94,19 @@ func (s *Signer) SignURL(fileID string, autograph bool) (string, error) {
 
 	signedURL := apiBaseURL + url + "&signature=" + signature
 	return signedURL, nil
+}
+
+// decodeClientSecret attempts to decode a base64-encoded client secret,
+// accepting standard, URL-safe, and unpadded variants.
+func decodeClientSecret(s string) ([]byte, error) {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return nil, fmt.Errorf("unable to decode client_secret as base64")
 }
