@@ -70,7 +70,11 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 	hasOffloadedMarker := offloadedMarkerErr == nil
 
 	if hasOffloadedMarker {
-		// Case 3: still intentionally offloaded. Do nothing.
+		// Case 3: still intentionally offloaded.
+		// Register an inotify watch on the parent directory so we are notified
+		// when the .offloaded marker is deleted, even if the main marker file
+		// was removed and the normal scan no longer finds this folder.
+		_ = d.addInotifyWatch(filepath.Dir(path))
 		return
 	}
 

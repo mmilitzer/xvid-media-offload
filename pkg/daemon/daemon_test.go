@@ -694,6 +694,73 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	d.stopInotify()
 }
 
+func TestReconcileWatchesOffloadedFileWhenMarkerMissing(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	// Create marker initially so the file gets offloaded.
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	createSparseFile(t, path)
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now delete the main marker so the scan won't find this folder.
+	if err := os.Remove(filepath.Join(setDir, ".htaccess")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .offloaded marker to simulate an intentionally offloaded file.
+	if err := os.WriteFile(path+".offloaded", []byte("offloaded"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+		LockFile:        filepath.Join(t.TempDir(), "daemon.lock"),
+	}
+
+	d := NewDaemon(cfg, false, database, nil)
+
+	// Start inotify manually.
+	if err := d.startInotify(); err != nil {
+		t.Skipf("inotify not available: %v", err)
+	}
+
+	rec := db.OffloadedRecord{LocalPath: path, RemoteFileID: "remote-id", Autograph: 1, OriginalSize: 100}
+	d.reconcileRecord(rec)
+
+	// Verify the parent directory got watched.
+	d.watchesMu.Lock()
+	_, watched := d.watches[filepath.Dir(path)]
+	d.watchesMu.Unlock()
+	if !watched {
+		t.Error("expected parent dir to be watched during reconciliation of offloaded file")
+	}
+
+	d.stopInotify()
+}
+
 func TestReconcileMarkerLookupInSubdirectory(t *testing.T) {
 	dir := t.TempDir()
 	setDir := filepath.Join(dir, "set1")

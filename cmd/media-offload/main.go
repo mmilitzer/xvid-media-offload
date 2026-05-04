@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -408,6 +409,12 @@ func runDaemon(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		return 1
+	}
+
+	// Default lock file to the same directory as the config file so it is
+	// writable by the unprivileged user running the daemon.
+	if cfg.LockFile == "" {
+		cfg.LockFile = filepath.Join(filepath.Dir(*configPath), "media-offload.lock")
 	}
 
 	var database *db.DB

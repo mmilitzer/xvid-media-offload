@@ -19,8 +19,11 @@ type Config struct {
 	DatabasePath    string   `yaml:"database_path"`
 	ScanInterval    Duration `yaml:"scan_interval"`
 	RestoreWorkers  int      `yaml:"restore_workers"`
-	LockFile        string   `yaml:"lock_file"`
-	Verbose         bool     `yaml:"-"` // set from CLI flag
+	// LockFile is the path to the daemon's advisory lock file.
+	// It must be writable by the user running the daemon.
+	// When empty, the daemon command defaults to a file next to the config.
+	LockFile string `yaml:"lock_file"`
+	Verbose  bool   `yaml:"-"` // set from CLI flag
 }
 
 // Load reads and parses a YAML configuration file.
@@ -46,7 +49,6 @@ const defaultMarkerFilename = ".htaccess"
 const defaultKeepPrefixBytes = 50 * 1024 * 1024 // 50 MB
 const defaultScanInterval = 24 * time.Hour
 const defaultRestoreWorkers = 4
-const defaultLockFile = "/var/run/media-offload.pid"
 
 // Validate checks that all required fields are present and valid.
 // Optional fields are set to their defaults when empty or zero.
@@ -77,9 +79,6 @@ func (c *Config) Validate() error {
 	}
 	if c.RestoreWorkers <= 0 {
 		c.RestoreWorkers = defaultRestoreWorkers
-	}
-	if c.LockFile == "" {
-		c.LockFile = defaultLockFile
 	}
 	return nil
 }

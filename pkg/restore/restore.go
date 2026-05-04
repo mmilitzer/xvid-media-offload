@@ -191,6 +191,18 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 		return RestoreInfo{}, fmt.Errorf("no credentials available")
 	}
 
+	// Clean up any stale temp files left by previous crashed or interrupted
+	// restore attempts before checking disk space.
+	baseName := filepath.Base(f.Path)
+	dir := filepath.Dir(f.Path)
+	if entries, readErr := os.ReadDir(dir); readErr == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), baseName+".restore.") && strings.HasSuffix(e.Name(), ".tmp") {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+
 	// Check disk space.
 	enough, avail, err := checkDiskSpace(f.Path, f.Size)
 	if err != nil {
@@ -215,18 +227,6 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 		return RestoreInfo{}, fmt.Errorf("signing URL: %w", err)
 	}
 
-	// Before downloading, clean up any stale temp files left by previous
-	// crashed or interrupted restore attempts.
-	baseName := filepath.Base(f.Path)
-	dir := filepath.Dir(f.Path)
-	if entries, readErr := os.ReadDir(dir); readErr == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), baseName+".restore.") && strings.HasSuffix(e.Name(), ".tmp") {
-				_ = os.Remove(filepath.Join(dir, e.Name()))
-			}
-		}
-	}
-
 	// Download to temp file.
 	tempPath := f.Path + ".restore." + uuid.NewString() + ".tmp"
 	err = downloader.DownloadContext(ctx, signedURL, tempPath)
@@ -245,6 +245,14 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 		if fi.Size() != f.Size {
 			os.Remove(tempPath)
 			return RestoreInfo{}, fmt.Errorf("size mismatch: expected %d, got %d", f.Size, fi.Size())
+		}
+	}
+
+	// Preserve the original file's permissions on the temp file before rename.
+	if origInfo, statErr := os.Stat(f.Path); statErr == nil {
+		if chmodErr := os.Chmod(tempPath, origInfo.Mode()); chmodErr != nil {
+			os.Remove(tempPath)
+			return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
 		}
 	}
 
