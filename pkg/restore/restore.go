@@ -45,7 +45,8 @@ type Result struct {
 
 // Job represents a single restore task.
 type Job struct {
-	File scanner.FileInfo
+	File        scanner.FileInfo
+	Credentials *credentials.Credentials
 }
 
 // Run scans for restore candidates and restores them using a worker pool.
@@ -65,6 +66,8 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 	}
 
 	// Pre-resolve remote IDs and credentials, build job queue.
+	// Credentials are cached per scan root to avoid repeated filesystem walks.
+	credCache := make(map[string]*credentials.Credentials)
 	var jobs []Job
 	for _, f := range scanRes.Files {
 		remoteID := f.RemoteID
@@ -92,20 +95,32 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 			continue
 		}
 
-		// Find credentials for this file's scan root.
-		_, _, credErr := credentials.FindForPath(f.ScanRoot)
-		if credErr != nil {
-			res.SkippedNoCreds++
-			msg := fmt.Sprintf("%s: no credentials found: %v", f.Path, credErr)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
+		// Find credentials for this file's scan root (cached).
+		creds, ok := credCache[f.ScanRoot]
+		if !ok {
+			var credErr error
+			creds, _, credErr = credentials.FindForPath(f.ScanRoot)
+			if credErr != nil {
+				res.SkippedNoCreds++
+				msg := fmt.Sprintf("%s: no credentials found: %v", f.Path, credErr)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				// Cache a nil marker so we don't retry this scan root.
+				credCache[f.ScanRoot] = nil
+				continue
 			}
+			credCache[f.ScanRoot] = creds
+		}
+		if creds == nil {
+			res.SkippedNoCreds++
 			continue
 		}
 
 		jobs = append(jobs, Job{
-			File: f,
+			File:        f,
+			Credentials: creds,
 		})
 		res.Queued++
 	}
@@ -164,10 +179,9 @@ func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader downloa
 		return fmt.Errorf("no remote file id")
 	}
 
-	// Resolve credentials.
-	creds, _, err := credentials.FindForPath(f.ScanRoot)
-	if err != nil {
-		return fmt.Errorf("credentials: %w", err)
+	creds := job.Credentials
+	if creds == nil {
+		return fmt.Errorf("no credentials available")
 	}
 
 	// Check disk space.
