@@ -49,7 +49,7 @@ func (d *Daemon) addInotifyWatch(dir string) error {
 }
 
 func (d *Daemon) inotifyReader() {
-	defer d.wg.Done()
+	defer d.producerWg.Done()
 
 	if d.inotifyFd < 0 {
 		return
@@ -98,6 +98,13 @@ func (d *Daemon) inotifyReader() {
 		for offset < n {
 			event := (*unix.InotifyEvent)(unsafe.Pointer(&buf[offset]))
 			nameLen := int(event.Len)
+			if event.Mask&unix.IN_Q_OVERFLOW != 0 {
+				log.Printf("inotify: queue overflow detected")
+				select {
+				case d.overflowRescan <- struct{}{}:
+				default:
+				}
+			}
 			if nameLen > 0 {
 				nameBytes := buf[offset+unix.SizeofInotifyEvent : offset+unix.SizeofInotifyEvent+nameLen]
 				name := string(bytes.TrimRight(nameBytes, "\x00"))

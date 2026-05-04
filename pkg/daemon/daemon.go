@@ -33,6 +33,15 @@ type Daemon struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// producerWg tracks goroutines that can enqueue into the restore queue
+	// (inotify reader, scan ticker callback). We wait for producers to stop
+	// before closing the queue to avoid send-on-closed-channel panics.
+	producerWg sync.WaitGroup
+
+	// restoreCtx is cancelled on shutdown to abort active downloads.
+	restoreCtx    context.Context
+	restoreCancel context.CancelFunc
+
 	ticker *time.Ticker
 
 	inotifyFd int
@@ -42,6 +51,9 @@ type Daemon struct {
 	queue      chan restoreJob
 	inFlight   map[string]bool
 	inFlightMu sync.Mutex
+
+	// overflowRescan signals that an inotify queue overflow occurred.
+	overflowRescan chan struct{}
 }
 
 type restoreJob struct {
@@ -56,13 +68,17 @@ type restoreJob struct {
 // NewDaemon creates a new daemon instance.
 func NewDaemon(cfg *config.Config, dryRun bool, database *db.DB, downloader download.Downloader) *Daemon {
 	return &Daemon{
-		cfg:        cfg,
-		dryRun:     dryRun,
-		database:   database,
-		downloader: downloader,
-		watches:    make(map[string]int),
-		queue:      make(chan restoreJob, 100),
-		inFlight:   make(map[string]bool),
+		cfg:            cfg,
+		dryRun:         dryRun,
+		database:       database,
+		downloader:     downloader,
+		inotifyFd:      -1,
+		watches:        make(map[string]int),
+		queue:          make(chan restoreJob, 100),
+		inFlight:       make(map[string]bool),
+		overflowRescan: make(chan struct{}, 1),
+		// Initialize ctx so tests that call enqueueRestore directly don't panic.
+		ctx: context.Background(),
 	}
 }
 
@@ -71,22 +87,16 @@ func (d *Daemon) Start() error {
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	defer d.cancel()
 
+	d.restoreCtx, d.restoreCancel = context.WithCancel(context.Background())
+	defer d.restoreCancel()
+
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	log.Println("daemon starting")
 
-	// DB reconciliation.
-	if d.database != nil {
-		log.Println("startup DB reconciliation beginning")
-		if err := d.reconcileDB(); err != nil {
-			log.Printf("DB reconciliation error: %v", err)
-		}
-		log.Println("startup DB reconciliation complete")
-	}
-
-	// Start restore workers.
+	// Start restore workers FIRST so DB reconciliation and scans can enqueue.
 	for i := 0; i < d.cfg.RestoreWorkers; i++ {
 		d.wg.Add(1)
 		go d.restoreWorker()
@@ -96,8 +106,17 @@ func (d *Daemon) Start() error {
 	if err := d.startInotify(); err != nil {
 		log.Printf("inotify not available: %v", err)
 	} else {
-		d.wg.Add(1)
+		d.producerWg.Add(1)
 		go d.inotifyReader()
+	}
+
+	// DB reconciliation.
+	if d.database != nil {
+		log.Println("startup DB reconciliation beginning")
+		if err := d.reconcileDB(); err != nil {
+			log.Printf("DB reconciliation error: %v", err)
+		}
+		log.Println("startup DB reconciliation complete")
 	}
 
 	// Initial scan.
@@ -120,6 +139,9 @@ func (d *Daemon) Start() error {
 			return nil
 		case <-d.ticker.C:
 			d.runScan()
+		case <-d.overflowRescan:
+			log.Println("inotify queue overflow: scheduling full rescan")
+			d.runScan()
 		}
 	}
 }
@@ -133,17 +155,33 @@ func (d *Daemon) Stop() {
 
 func (d *Daemon) shutdown() {
 	log.Println("daemon shutting down")
-	d.cancel()
 
+	// 1. Cancel all contexts so producers and downloads stop.
+	if d.restoreCancel != nil {
+		d.restoreCancel()
+	}
+	if d.cancel != nil {
+		d.cancel()
+	}
+
+	// 2. Stop the ticker so no new scans are scheduled.
 	if d.ticker != nil {
 		d.ticker.Stop()
 	}
 
+	// 3. Stop inotify so no new events are produced.
 	d.stopInotify()
 
+	// 4. Wait for all producers to finish before closing the queue.
+	d.producerWg.Wait()
+
+	// 5. Close the queue so workers exit.
 	close(d.queue)
+
+	// 6. Wait for workers to drain.
 	d.wg.Wait()
 
+	// 7. Close DB.
 	if d.database != nil {
 		d.database.Close()
 	}
@@ -158,8 +196,15 @@ func (d *Daemon) runScan() {
 	d.combinedScan()
 }
 
-// enqueueRestore adds a restore job if not already in flight.
+// enqueueRestore adds a restore job if not already in flight and not shutting down.
 func (d *Daemon) enqueueRestore(job restoreJob) bool {
+	// Fast-path: if shutting down, don't enqueue.
+	select {
+	case <-d.ctx.Done():
+		return false
+	default:
+	}
+
 	d.inFlightMu.Lock()
 	if d.inFlight[job.Path] {
 		d.inFlightMu.Unlock()
@@ -177,6 +222,11 @@ func (d *Daemon) enqueueRestore(job restoreJob) bool {
 			log.Printf("restore enqueued: %s", job.Path)
 		}
 		return true
+	case <-d.ctx.Done():
+		d.inFlightMu.Lock()
+		delete(d.inFlight, job.Path)
+		d.inFlightMu.Unlock()
+		return false
 	default:
 		d.inFlightMu.Lock()
 		delete(d.inFlight, job.Path)
@@ -186,17 +236,38 @@ func (d *Daemon) enqueueRestore(job restoreJob) bool {
 	}
 }
 
+// enqueueRestoreBlocking adds a restore job, blocking until the queue has room
+// or the context is cancelled. Used by DB reconciliation to avoid silently
+// dropping jobs when the queue buffer is full.
+func (d *Daemon) enqueueRestoreBlocking(ctx context.Context, job restoreJob) bool {
+	d.inFlightMu.Lock()
+	if d.inFlight[job.Path] {
+		d.inFlightMu.Unlock()
+		log.Printf("duplicate restore skipped (in flight): %s", job.Path)
+		return false
+	}
+	d.inFlight[job.Path] = true
+	d.inFlightMu.Unlock()
+
+	select {
+	case d.queue <- job:
+		if d.dryRun {
+			log.Printf("dry-run: would enqueue restore: %s", job.Path)
+		} else {
+			log.Printf("restore enqueued: %s", job.Path)
+		}
+		return true
+	case <-ctx.Done():
+		d.inFlightMu.Lock()
+		delete(d.inFlight, job.Path)
+		d.inFlightMu.Unlock()
+		return false
+	}
+}
+
 func (d *Daemon) restoreWorker() {
 	defer d.wg.Done()
 	for job := range d.queue {
-		if d.ctx.Err() != nil {
-			// Shutting down; clear in-flight and stop.
-			d.inFlightMu.Lock()
-			delete(d.inFlight, job.Path)
-			d.inFlightMu.Unlock()
-			continue
-		}
-
 		if d.dryRun {
 			log.Printf("dry-run: would restore: %s", job.Path)
 			d.inFlightMu.Lock()
@@ -237,7 +308,19 @@ func (d *Daemon) runRestore(job restoreJob) error {
 		Credentials: creds,
 	}
 
-	_, err = restore.RestoreOne(rjob, d.cfg, d.database, d.downloader)
+	_, err = restore.RestoreOne(d.restoreCtx, rjob, d.cfg, d.database, d.downloader)
+	if err != nil {
+		// Clean up any partial temp file left behind by cancellation or failure.
+		dir := filepath.Dir(job.Path)
+		entries, readErr := os.ReadDir(dir)
+		if readErr == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), filepath.Base(job.Path)+".restore.") && strings.HasSuffix(e.Name(), ".tmp") {
+					_ = os.Remove(filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+	}
 	return err
 }
 
@@ -256,6 +339,13 @@ func (d *Daemon) combinedScan() {
 		log.Printf("shrink error: %v", err)
 	} else if !d.dryRun && len(shrinkRes.Offloaded) > 0 {
 		log.Printf("shrink offloaded %d files", len(shrinkRes.Offloaded))
+		// Register inotify watches for newly offloaded files immediately.
+		for _, o := range shrinkRes.Offloaded {
+			dir := filepath.Dir(o.Path)
+			if err := d.addInotifyWatch(dir); err != nil {
+				log.Printf("inotify watch error for newly offloaded %s: %v", dir, err)
+			}
+		}
 	} else if d.dryRun && len(shrinkRes.Candidates) > 0 {
 		log.Printf("dry-run: would shrink %d files", len(shrinkRes.Candidates))
 	}
@@ -292,19 +382,16 @@ func (d *Daemon) combinedScan() {
 	}
 }
 
-// resolveRestoreJob attempts to build a restoreJob for a file path by reading
-// the marker file in its ancestor directories. It falls back to the DB if needed.
-func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
+// findMarkerForPath walks upward from the file's directory looking for the
+// configured marker file. It returns the marker path and the directory it was
+// found in.
+func findMarkerForPath(path string, markerFilename string) (markerPath string, markerDir string) {
 	dir := filepath.Dir(path)
-
-	// Walk upward looking for the marker file.
-	var markerPath string
 	searchDir := dir
 	for {
-		candidate := filepath.Join(searchDir, d.cfg.MarkerFilename)
+		candidate := filepath.Join(searchDir, markerFilename)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			markerPath = candidate
-			break
+			return candidate, searchDir
 		}
 		parent := filepath.Dir(searchDir)
 		if parent == searchDir {
@@ -312,6 +399,13 @@ func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
 		}
 		searchDir = parent
 	}
+	return "", ""
+}
+
+// resolveRestoreJob attempts to build a restoreJob for a file path by reading
+// the marker file in its ancestor directories. It falls back to the DB if needed.
+func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
+	markerPath, markerDir := findMarkerForPath(path, d.cfg.MarkerFilename)
 
 	var remoteID string
 	var autograph int = -1
@@ -319,7 +413,7 @@ func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
 
 	if markerPath != "" {
 		if info, err := marker.Parse(markerPath); err == nil && info.Valid {
-			relPath, _ := filepath.Rel(filepath.Dir(markerPath), path)
+			relPath, _ := filepath.Rel(markerDir, path)
 			relPath = filepath.ToSlash(relPath)
 			if id, ok := info.MatchFileID(relPath); ok {
 				remoteID = id

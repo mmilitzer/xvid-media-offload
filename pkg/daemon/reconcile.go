@@ -74,14 +74,13 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 		return
 	}
 
-	// .offloaded marker is missing.
-	dir := filepath.Dir(path)
-	markerPath := filepath.Join(dir, d.cfg.MarkerFilename)
+	// .offloaded marker is missing. Walk upward to find the main marker file.
+	markerPath, markerDir := findMarkerForPath(path, d.cfg.MarkerFilename)
 	mInfo, err := marker.Parse(markerPath)
 	markerValid := err == nil && mInfo.Valid
 	markerHasFileID := false
-	if markerValid {
-		relPath, _ := filepath.Rel(dir, path)
+	if markerValid && markerDir != "" {
+		relPath, _ := filepath.Rel(markerDir, path)
 		relPath = filepath.ToSlash(relPath)
 		_, markerHasFileID = mInfo.MatchFileID(relPath)
 	}
@@ -104,6 +103,6 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 		Size:       rec.OriginalSize,
 		MarkerPath: markerPath,
 	}
-	d.enqueueRestore(job)
+	d.enqueueRestoreBlocking(d.ctx, job)
 	log.Printf("DB reconcile: enqueued DB-only restore for %s", path)
 }

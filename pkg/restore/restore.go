@@ -1,6 +1,7 @@
 package restore
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -164,11 +165,11 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 }
 
 // RestoreOne performs a single-file restore and returns details about the restored file.
-func RestoreOne(job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
-	return restoreOne(job, cfg, database, downloader)
+func RestoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
+	return restoreOne(ctx, job, cfg, database, downloader)
 }
 
-func restoreOne(job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
+func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
 	f := job.File
 
 	// Resolve remote ID and autograph again inside worker.
@@ -216,7 +217,7 @@ func restoreOne(job Job, cfg *config.Config, database *db.DB, downloader downloa
 
 	// Download to temp file.
 	tempPath := f.Path + ".restore." + uuid.NewString() + ".tmp"
-	err = downloader.Download(signedURL, tempPath)
+	err = downloader.DownloadContext(ctx, signedURL, tempPath)
 	if err != nil {
 		os.Remove(tempPath)
 		return RestoreInfo{}, fmt.Errorf("download: %w", err)
@@ -269,7 +270,7 @@ func restoreOne(job Job, cfg *config.Config, database *db.DB, downloader downloa
 }
 
 func restoreJob(job Job, cfg *config.Config, database *db.DB, downloader download.Downloader, res *Result, mu *sync.Mutex) error {
-	info, err := restoreOne(job, cfg, database, downloader)
+	info, err := restoreOne(context.Background(), job, cfg, database, downloader)
 	if err != nil {
 		if strings.Contains(err.Error(), "not enough disk space") {
 			mu.Lock()

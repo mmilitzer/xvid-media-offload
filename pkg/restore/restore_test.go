@@ -1,6 +1,7 @@
 package restore
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,10 @@ type mockDownloader struct {
 }
 
 func (m *mockDownloader) Download(signedURL string, destPath string) error {
+	return m.DownloadContext(context.Background(), signedURL, destPath)
+}
+
+func (m *mockDownloader) DownloadContext(ctx context.Context, signedURL string, destPath string) error {
 	m.calls = append(m.calls, struct {
 		url  string
 		dest string

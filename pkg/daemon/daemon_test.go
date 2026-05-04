@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -441,5 +443,310 @@ func createSparseFile(t *testing.T, path string) {
 	if !isSparse {
 		// If filesystem doesn't support sparse detection, skip.
 		t.Skip("filesystem does not support sparse file detection")
+	}
+}
+
+// cancellableDownloader blocks until its context is cancelled, then returns the ctx error.
+type cancellableDownloader struct {
+	started chan struct{}
+}
+
+func (c *cancellableDownloader) Download(signedURL string, destPath string) error {
+	return c.DownloadContext(context.Background(), signedURL, destPath)
+}
+
+func (c *cancellableDownloader) DownloadContext(ctx context.Context, signedURL string, destPath string) error {
+	close(c.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestShutdownCancelsActiveRestore(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	// Create a sparse file so the initial scan enqueues a restore job.
+	createSparseFile(t, path)
+
+	createCredentialFile(t, dir, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	downloader := &cancellableDownloader{started: make(chan struct{})}
+	d := NewDaemon(cfg, false, nil, downloader)
+
+	// Start the daemon in background.
+	done := make(chan error, 1)
+	go func() {
+		done <- d.Start()
+	}()
+
+	// Wait for the downloader to start (meaning restore is active).
+	select {
+	case <-downloader.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("downloader did not start")
+	}
+
+	// Create a temp file to verify cleanup.
+	tmpPath := path + ".restore.abc123.tmp"
+	if err := os.WriteFile(tmpPath, []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger shutdown while restore is in progress.
+	d.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon did not stop in time")
+	}
+
+	// Verify the partial temp file was cleaned up.
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Errorf("expected partial temp file to be deleted after shutdown cancellation")
+	}
+}
+
+func TestEnqueueRestoreNoPanicAfterShutdown(t *testing.T) {
+	cfg := &config.Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, nil, nil)
+
+	// Start and immediately stop to set ctx to cancelled.
+	go d.Start()
+	time.Sleep(50 * time.Millisecond)
+	d.Stop()
+
+	// Give shutdown time to cancel ctx but not necessarily close queue yet.
+	time.Sleep(50 * time.Millisecond)
+
+	// Enqueue should not panic; it should return false because ctx is done.
+	job := restoreJob{Path: "/media/video.mp4", RemoteID: "abc123"}
+	if d.enqueueRestore(job) {
+		t.Error("expected enqueue to fail after shutdown")
+	}
+}
+
+func TestReconcileDBOnlyBlockingWithFullQueue(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	// Create 5 sparse files with DB records but no markers.
+	paths := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("video%d.mp4", i))
+		createSparseFile(t, paths[i])
+		if err := database.UpsertOffloadedFile(paths[i], fmt.Sprintf("remote-id-%d", i), 1, 100, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, database, nil)
+	// Use a tiny queue so blocking is required.
+	d.queue = make(chan restoreJob, 1)
+
+	// Start a slow worker so the queue fills up.
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		for job := range d.queue {
+			time.Sleep(100 * time.Millisecond)
+			d.inFlightMu.Lock()
+			delete(d.inFlight, job.Path)
+			d.inFlightMu.Unlock()
+		}
+	}()
+
+	// Reconciliation should block but eventually enqueue all 5 jobs.
+	d.reconcileDB()
+
+	// Wait for all jobs to be processed.
+	close(d.queue)
+	d.wg.Wait()
+
+	// All 5 should have been enqueued and processed.
+	for _, p := range paths {
+		d.inFlightMu.Lock()
+		inFlight := d.inFlight[p]
+		d.inFlightMu.Unlock()
+		if inFlight {
+			t.Errorf("expected job for %s to be processed", p)
+		}
+	}
+}
+
+func TestNewlyOffloadedFilesGetWatchedImmediately(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
+	}
+
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	// Create a large enough old file.
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	d := NewDaemon(cfg, false, database, nil)
+
+	// Start inotify manually.
+	if err := d.startInotify(); err != nil {
+		t.Skipf("inotify not available: %v", err)
+	}
+
+	// Run combined scan in apply mode.
+	d.combinedScan()
+
+	// Verify the file was offloaded.
+	if _, err := os.Stat(path + ".offloaded"); os.IsNotExist(err) {
+		t.Fatal("expected .offloaded marker to be created")
+	}
+
+	// Verify inotify watch was registered for the parent directory.
+	d.watchesMu.Lock()
+	_, watched := d.watches[filepath.Dir(path)]
+	d.watchesMu.Unlock()
+	if !watched {
+		t.Error("expected parent dir of newly offloaded file to be watched immediately")
+	}
+
+	d.stopInotify()
+}
+
+func TestReconcileMarkerLookupInSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	// Marker is in setDir, file is in setDir/4k/.
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	createSparseFile(t, path)
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, database, nil)
+	rec := db.OffloadedRecord{LocalPath: path, RemoteFileID: "remote-id", Autograph: 1, OriginalSize: 100}
+
+	// The marker lookup should walk upward from setDir/4k/ to setDir/ and find
+	// the file id, so this should be treated as Case 4 (marker has file id) and
+	// NOT enqueued for DB-only recovery.
+	d.reconcileRecord(rec)
+
+	d.inFlightMu.Lock()
+	inFlight := d.inFlight[path]
+	d.inFlightMu.Unlock()
+	if inFlight {
+		t.Error("expected reconcile to find marker in parent dir and NOT enqueue DB-only recovery")
+	}
+}
+
+func createCredentialFile(t *testing.T, dir, clientID, clientSecret string) {
+	t.Helper()
+	content := fmt.Sprintf("[xvid]\nAPP_CLIENT_ID = \"%s\"\nAPP_CLIENT_SECRET = \"%s\"\n", clientID, clientSecret)
+	path := filepath.Join(dir, "cmsinclude.ini.php")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
