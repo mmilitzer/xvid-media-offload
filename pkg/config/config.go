@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,6 +17,8 @@ type Config struct {
 	MinimumAge      Duration `yaml:"minimum_age"`
 	KeepPrefixBytes int64    `yaml:"keep_prefix_bytes"`
 	DatabasePath    string   `yaml:"database_path"`
+	ScanInterval    Duration `yaml:"scan_interval"`
+	RestoreWorkers  int      `yaml:"restore_workers"`
 	Verbose         bool     `yaml:"-"` // set from CLI flag
 }
 
@@ -40,6 +43,8 @@ func Load(path string) (*Config, error) {
 
 const defaultMarkerFilename = ".htaccess"
 const defaultKeepPrefixBytes = 50 * 1024 * 1024 // 50 MB
+const defaultScanInterval = 24 * time.Hour
+const defaultRestoreWorkers = 4
 
 // Validate checks that all required fields are present and valid.
 // Optional fields are set to their defaults when empty or zero.
@@ -64,6 +69,12 @@ func (c *Config) Validate() error {
 	}
 	if c.KeepPrefixBytes <= 0 {
 		c.KeepPrefixBytes = defaultKeepPrefixBytes
+	}
+	if c.ScanInterval.Duration() <= 0 {
+		c.ScanInterval = Duration(defaultScanInterval)
+	}
+	if c.RestoreWorkers <= 0 {
+		c.RestoreWorkers = defaultRestoreWorkers
 	}
 	return nil
 }

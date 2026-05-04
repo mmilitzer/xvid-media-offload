@@ -244,3 +244,65 @@ database_path: "/var/lib/media-offload/db.db"
 		t.Errorf("unexpected database_path: %s", cfg.DatabasePath)
 	}
 }
+
+func TestValidateScanIntervalDefault(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ScanInterval.Duration() != 24*time.Hour {
+		t.Errorf("expected default scan_interval 24h, got %v", cfg.ScanInterval.Duration())
+	}
+}
+
+func TestValidateRestoreWorkersDefault(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RestoreWorkers != 4 {
+		t.Errorf("expected default restore_workers 4, got %d", cfg.RestoreWorkers)
+	}
+}
+
+func TestLoadConfigWithDaemonFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+scan_roots:
+  - /tmp/scan1
+candidate_globs:
+  - "**/*.mp4"
+marker_filename: ".htaccess"
+minimum_age: "720h"
+keep_prefix_bytes: 52428800
+scan_interval: "6h"
+restore_workers: 8
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if cfg.ScanInterval.Duration() != 6*time.Hour {
+		t.Errorf("expected scan_interval 6h, got %v", cfg.ScanInterval.Duration())
+	}
+	if cfg.RestoreWorkers != 8 {
+		t.Errorf("expected restore_workers 8, got %d", cfg.RestoreWorkers)
+	}
+}
