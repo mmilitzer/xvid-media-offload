@@ -64,21 +64,7 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 		return
 	}
 
-	// File is sparse.
-	offloadedMarkerPath := path + ".offloaded"
-	_, offloadedMarkerErr := os.Stat(offloadedMarkerPath)
-	hasOffloadedMarker := offloadedMarkerErr == nil
-
-	if hasOffloadedMarker {
-		// Case 3: still intentionally offloaded.
-		// Register an inotify watch on the parent directory so we are notified
-		// when the .offloaded marker is deleted, even if the main marker file
-		// was removed and the normal scan no longer finds this folder.
-		_ = d.addInotifyWatch(filepath.Dir(path))
-		return
-	}
-
-	// .offloaded marker is missing. Walk upward to find the main marker file.
+	// File is sparse. Walk upward to find the main marker file first.
 	markerPath, markerDir := findMarkerForPath(path, d.cfg.MarkerFilename)
 	mInfo, err := marker.Parse(markerPath)
 	markerValid := err == nil && mInfo.Valid
@@ -89,12 +75,34 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 		_, markerHasFileID = mInfo.MatchFileID(relPath)
 	}
 
+	offloadedMarkerPath := path + ".offloaded"
+	_, offloadedMarkerErr := os.Stat(offloadedMarkerPath)
+	hasOffloadedMarker := offloadedMarkerErr == nil
+
 	if markerValid && markerHasFileID {
-		// Case 4: marker exists with file id. Normal scan will handle it.
+		// Case 3: marker exists with file id.
+		if hasOffloadedMarker {
+			// Still intentionally offloaded. Register an inotify watch.
+			_ = d.addInotifyWatch(filepath.Dir(path))
+		}
+		// If .offloaded is missing, normal scan will handle it.
 		return
 	}
 
-	// Case 5: DB-only recovery.
+	// Case 4 & 5: marker is missing, invalid, or no longer contains the file's
+	// remote file id. The set is no longer managed by our service.
+	if hasOffloadedMarker {
+		if d.dryRun {
+			log.Printf("dry-run DB reconcile: would remove .offloaded marker for %s", path)
+		} else {
+			if err := os.Remove(offloadedMarkerPath); err != nil {
+				log.Printf("DB reconcile: failed to remove .offloaded marker for %s: %v", path, err)
+			} else {
+				log.Printf("DB reconcile: removed .offloaded marker for %s", path)
+			}
+		}
+	}
+
 	if d.dryRun {
 		log.Printf("dry-run DB reconcile: would enqueue DB-only restore for %s", path)
 		return
