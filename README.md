@@ -2,7 +2,7 @@
 
 > Reclaim local disk space without breaking your CMS.
 
-Media Local Offload is a lightweight Linux tool that automatically frees disk space from large MP4 video files while keeping them fully visible to your content management system. It is designed especially for sites running **Elevated-X** and other CMS platforms that require media files to remain present in the local filesystem even when the live site serves them from cloud CDN.
+Media Local Offload is a lightweight Linux tool that automatically frees disk space from large MP4 video files while keeping them fully visible to your content management system. It is designed especially for sites running **Elevated-X** and other CMS platforms that require media files to remain present in the local filesystem even when the live site serves them from the **Xvid MediaHub CDN**.
 
 ## What it does for you
 
@@ -11,7 +11,7 @@ Video hosting bills are split two ways: cloud storage for delivery and local dis
 Media Local Offload solves this with a much simpler approach:
 
 - **The file stays right where it is.** Your CMS still sees the original path and the original file size.
-- **The first part of the file is preserved** so MP4 metadata (duration, resolution, thumbnails) continues to work.
+- **The first part of the file is preserved** so MP4 metadata such as duration and resolution remains readable, and initial preview frames continue to work.
 - **The bulk of the file is transparently deallocated** using Linux hole punching, instantly freeing most of the disk blocks.
 - **The full video can be restored on demand** from Xvid MediaHub cloud storage whenever it is needed again.
 
@@ -34,10 +34,16 @@ Pre-built Linux amd64 binaries are available from the GitHub Actions CI pipeline
 3. Scroll down to the **Artifacts** section.
 4. Download `media-offload-linux-amd64`.
 
-Place the binary somewhere in your `$PATH`, for example `/usr/local/bin/media-offload`, and make it executable:
+Place the binary somewhere in your `$PATH`, for example `~/bin/media-offload`, and make it executable:
 
 ```bash
-chmod +x /usr/local/bin/media-offload
+chmod +x ~/bin/media-offload
+```
+
+If `~/bin` is not in your path yet, add it in your shell profile:
+
+```bash
+export PATH="$HOME/bin:$PATH"
 ```
 
 The tool is a single static binary with no CGo dependency and no runtime requirements beyond a modern Linux kernel.
@@ -99,16 +105,16 @@ The binary provides four commands: `scan`, `shrink`, `restore`, and `daemon`.
 
 ### `scan` — preview candidates
 
-Report which files would be offloaded without changing anything:
+The `scan` command is read-only. It reports which files are currently eligible for offloading without changing anything on disk:
 
 ```bash
-media-offload scan --config ./config.yaml --dry-run
+media-offload scan --config ./config.yaml
 ```
 
 Add `--verbose` to see per-file skip reasons and detailed errors:
 
 ```bash
-media-offload scan --config ./config.yaml --dry-run --verbose
+media-offload scan --config ./config.yaml --verbose
 ```
 
 ### `shrink` — offload files
@@ -150,7 +156,7 @@ The daemon combines everything into a single background service:
 Run the daemon manually:
 
 ```bash
-media-offload daemon --config /etc/media-offload/config.yaml
+media-offload daemon --config ~/media-offload/config.yaml
 ```
 
 ---
@@ -169,9 +175,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
-ExecStart=/usr/local/bin/media-offload daemon --config /etc/media-offload/config.yaml
+User=myuser
+Group=myuser
+ExecStart=/home/myuser/bin/media-offload daemon --config /home/myuser/media-offload/config.yaml
 Restart=on-failure
 RestartSec=10
 
@@ -179,19 +185,19 @@ RestartSec=10
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/home/html/site_root/content /var/lib/media-offload
+ReadWritePaths=/home/html/site_root/content /home/myuser/media-offload
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Adjust `User`, `Group`, and `ReadWritePaths` to match the owner of your content directories and the location of your optional database.
+Adjust `User`, `Group`, `ExecStart`, and `ReadWritePaths` to match the owner of your content directories and the location of your config and optional database.
 
 Then create the configuration directory, place your `config.yaml` inside it, and start the service:
 
 ```bash
-mkdir -p /etc/media-offload
-# edit /etc/media-offload/config.yaml
+mkdir -p ~/media-offload
+# edit ~/media-offload/config.yaml
 
 systemctl daemon-reload
 systemctl enable --now media-offload
@@ -206,6 +212,12 @@ journalctl -u media-offload -f
 
 Because the daemon holds an advisory file lock, running a manual `shrink` or `restore` command while the daemon is active will be safely refused (dry-run scans are still allowed).
 
+**Note:** The daemon reads the configuration file once at startup. If you change `config.yaml`, restart the service to apply the changes:
+
+```bash
+systemctl restart media-offload
+```
+
 ---
 
 ## How it works
@@ -214,7 +226,7 @@ Because the daemon holds an advisory file lock, running a manual `shrink` or `re
 
 Instead of deleting a file, the tool keeps it in place and uses Linux hole punching (`fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)`) to deallocate disk blocks from a configurable offset to the end of the file. The logical file size reported by `stat()` remains unchanged, but the actual allocated disk space drops to roughly the size of the preserved prefix.
 
-The preserved prefix (default 50 MB) is large enough to keep MP4 metadata boxes intact so that duration, resolution, and thumbnail extraction continue to work.
+The preserved prefix (default 50 MB) is large enough to keep MP4 metadata boxes intact so that duration, resolution, and initial preview frames remain readable.
 
 This technique is supported on common Linux filesystems including ext4, XFS, and Btrfs. The tool detects unsupported filesystems safely and skips offloading rather than damaging files.
 
@@ -314,7 +326,7 @@ go vet ./...
 
 ---
 
-## Safety rules
+## Built-in safety principles
 
 - Never modify a file unless its folder has a valid marker file.
 - Never modify a file unless its remote file ID is known.
