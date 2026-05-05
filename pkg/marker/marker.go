@@ -53,6 +53,7 @@ func Parse(path string) (*Info, error) {
 	var blockAutographSet bool
 	var blockAutographValue int
 	var firstLineValid bool
+	var firstLineHasComment bool
 	var lineNum int
 	var entries []entry
 
@@ -64,6 +65,8 @@ func Parse(path string) (*Info, error) {
 		if lineNum == 1 {
 			if line == expectedFirstLine {
 				firstLineValid = true
+			} else if strings.HasPrefix(line, "#") {
+				firstLineHasComment = true
 			}
 		}
 
@@ -122,7 +125,7 @@ func Parse(path string) (*Info, error) {
 	if firstLineValid {
 		info.Valid = true
 	} else {
-		info.Valid = validateLegacyMarker(entries)
+		info.Valid = validateLegacyMarker(entries, firstLineHasComment)
 	}
 
 	if info.Valid {
@@ -144,7 +147,11 @@ func Parse(path string) (*Info, error) {
 
 // validateLegacyMarker checks whether a marker without the expected first
 // line is still valid under the legacy rules.
-func validateLegacyMarker(entries []entry) bool {
+// A legacy marker is only valid when the first line has no comment at all.
+func validateLegacyMarker(entries []entry, firstLineHasComment bool) bool {
+	if firstLineHasComment {
+		return false
+	}
 	if len(entries) == 0 {
 		return false
 	}

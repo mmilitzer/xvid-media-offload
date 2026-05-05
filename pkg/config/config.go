@@ -23,7 +23,10 @@ type Config struct {
 	// It must be writable by the user running the daemon.
 	// When empty, the daemon command defaults to a file next to the config.
 	LockFile string `yaml:"lock_file"`
-	Verbose  bool   `yaml:"-"` // set from CLI flag
+	// DownloadTimeout is the global HTTP timeout for file downloads.
+	// When empty or zero, defaults to 6 hours.
+	DownloadTimeout Duration `yaml:"download_timeout"`
+	Verbose         bool     `yaml:"-"` // set from CLI flag
 }
 
 // Load reads and parses a YAML configuration file.
@@ -49,6 +52,7 @@ const defaultMarkerFilename = ".htaccess"
 const defaultKeepPrefixBytes = 50 * 1024 * 1024 // 50 MB
 const defaultScanInterval = 24 * time.Hour
 const defaultRestoreWorkers = 4
+const defaultDownloadTimeout = 6 * time.Hour
 
 // Validate checks that all required fields are present and valid.
 // Optional fields are set to their defaults when empty or zero.
@@ -79,6 +83,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RestoreWorkers <= 0 {
 		c.RestoreWorkers = defaultRestoreWorkers
+	}
+	if c.DownloadTimeout.Duration() <= 0 {
+		c.DownloadTimeout = Duration(defaultDownloadTimeout)
 	}
 	return nil
 }

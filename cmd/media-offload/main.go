@@ -14,6 +14,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/daemon"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/download"
+	"github.com/mmilitzer/xvid-media-offload/pkg/lockfile"
 	"github.com/mmilitzer/xvid-media-offload/pkg/restore"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
 	"github.com/mmilitzer/xvid-media-offload/pkg/shrink"
@@ -183,6 +184,17 @@ func runShrink(args []string) int {
 		}
 	}
 
+	// Acquire the same advisory lock the daemon uses to prevent races.
+	if !*dryRun {
+		lockPath := resolveLockFilePath(cfg, *configPath)
+		lock, err := lockfile.Acquire(lockPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		defer lock.Release()
+	}
+
 	res, err := shrink.Run(cfg, *dryRun, database)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error shrinking: %v\n", err)
@@ -333,7 +345,18 @@ func runRestore(args []string) int {
 		defer database.Close()
 	}
 
-	downloader := &download.HTTPDownloader{}
+	// Acquire the same advisory lock the daemon uses to prevent races.
+	if !*dryRun {
+		lockPath := resolveLockFilePath(cfg, *configPath)
+		lock, err := lockfile.Acquire(lockPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		defer lock.Release()
+	}
+
+	downloader := &download.HTTPDownloader{Timeout: cfg.DownloadTimeout.Duration()}
 	res, err := restore.Run(cfg, *dryRun, *workers, database, downloader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error restoring: %v\n", err)
@@ -426,10 +449,20 @@ func runDaemon(args []string) int {
 		}
 	}
 
-	d := daemon.NewDaemon(cfg, *dryRun, database, &download.HTTPDownloader{})
+	d := daemon.NewDaemon(cfg, *dryRun, database, &download.HTTPDownloader{Timeout: cfg.DownloadTimeout.Duration()})
 	if err := d.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running daemon: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// resolveLockFilePath returns the effective lock file path.
+// If the config specifies one, it is used; otherwise it defaults to a file
+// next to the config file so it is writable by the unprivileged user.
+func resolveLockFilePath(cfg *config.Config, configPath string) string {
+	if cfg.LockFile != "" {
+		return cfg.LockFile
+	}
+	return filepath.Join(filepath.Dir(configPath), "media-offload.lock")
 }
