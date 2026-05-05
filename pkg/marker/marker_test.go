@@ -151,6 +151,31 @@ RewriteRule "^720p/abc.mp4" - [F,L,NC]
 	}
 }
 
+func TestParseLegacyInvalidWithOtherCommentFirstLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".htaccess")
+	data := `#Some other comment
+RewriteEngine on
+RewriteRule "^720p/abc.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Valid {
+		t.Fatal("expected legacy marker with a commented first line to be invalid")
+	}
+	if len(info.FileIDByRel) != 0 {
+		t.Errorf("expected 0 mappings, got %d", len(info.FileIDByRel))
+	}
+}
+
 func TestParseMultipleResolutions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".htaccess")

@@ -27,7 +27,8 @@ type Downloader interface {
 
 // HTTPDownloader implements Downloader using the standard HTTP client.
 type HTTPDownloader struct {
-	Client *http.Client
+	Client  *http.Client
+	Timeout time.Duration
 }
 
 // Download downloads the resource at signedURL to destPath.
@@ -39,7 +40,11 @@ func (d *HTTPDownloader) Download(signedURL string, destPath string) error {
 func (d *HTTPDownloader) DownloadContext(ctx context.Context, signedURL string, destPath string) error {
 	client := d.Client
 	if client == nil {
-		client = http.DefaultClient
+		if d.Timeout > 0 {
+			client = &http.Client{Timeout: d.Timeout}
+		} else {
+			client = http.DefaultClient
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signedURL, nil)

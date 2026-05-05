@@ -5,8 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSignURLBasic(t *testing.T) {
@@ -110,5 +115,52 @@ func TestSignURLSignatureValid(t *testing.T) {
 
 	if !hmac.Equal([]byte(expectedSig), []byte(computedSig)) {
 		t.Error("signature mismatch")
+	}
+}
+
+func TestHTTPDownloaderUsesTimeout(t *testing.T) {
+	// Server that waits longer than the timeout.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "download.txt")
+
+	d := &HTTPDownloader{Timeout: 50 * time.Millisecond}
+	err := d.Download(srv.URL, dest)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "Client.Timeout") && !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHTTPDownloaderSuccessWithTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hello"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "download.txt")
+
+	d := &HTTPDownloader{Timeout: 5 * time.Second}
+	err := d.Download(srv.URL, dest)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("unexpected content: %s", string(data))
 	}
 }
