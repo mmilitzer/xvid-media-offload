@@ -306,3 +306,164 @@ restore_workers: 8
 		t.Errorf("expected restore_workers 8, got %d", cfg.RestoreWorkers)
 	}
 }
+
+func TestValidateMarkerFileModeDefault(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MarkerFileMode != "" {
+		t.Errorf("expected empty marker_file_mode by default, got %s", cfg.MarkerFileMode)
+	}
+}
+
+func TestValidateMarkerFileModeExplicit(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		MarkerFileMode:  "0666",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateMarkerFileModeSameAsSource(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		MarkerFileMode:  "same-as-source",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateMarkerFileModeInvalidOctal(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		MarkerFileMode:  "not-octal",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid marker_file_mode")
+	}
+}
+
+func TestValidateMarkerFileModeTooLarge(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		MarkerFileMode:  "07777",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for marker_file_mode exceeding 0777")
+	}
+}
+
+func TestResolveMarkerFileModeSameAsSource(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(sourcePath, []byte("content"), 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{MarkerFileMode: "same-as-source"}
+	mode, err := cfg.ResolveMarkerFileMode(sourcePath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != 0750 {
+		t.Errorf("expected mode 0750, got %04o", mode)
+	}
+}
+
+func TestResolveMarkerFileModeEmptyDefaultsToSameAsSource(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(sourcePath, []byte("content"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{MarkerFileMode: ""}
+	mode, err := cfg.ResolveMarkerFileMode(sourcePath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != 0640 {
+		t.Errorf("expected mode 0640, got %04o", mode)
+	}
+}
+
+func TestResolveMarkerFileModeExplicit(t *testing.T) {
+	cfg := &Config{MarkerFileMode: "0666"}
+	mode, err := cfg.ResolveMarkerFileMode("/nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != 0666 {
+		t.Errorf("expected mode 0666, got %04o", mode)
+	}
+}
+
+func TestCreateOffloadedMarkerRespectsMode(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "video.mp4")
+	markerPath := filepath.Join(dir, "video.mp4.offloaded")
+	if err := os.WriteFile(sourcePath, []byte("content"), 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{MarkerFileMode: "same-as-source"}
+	if err := cfg.CreateOffloadedMarker(sourcePath, markerPath, []byte("marker")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fi, err := os.Stat(markerPath)
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected marker mode 0750, got %04o", fi.Mode().Perm())
+	}
+}
+
+func TestCreateOffloadedMarkerExplicitMode(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "video.mp4")
+	markerPath := filepath.Join(dir, "video.mp4.offloaded")
+	if err := os.WriteFile(sourcePath, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{MarkerFileMode: "0666"}
+	if err := cfg.CreateOffloadedMarker(sourcePath, markerPath, []byte("marker")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fi, err := os.Stat(markerPath)
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if fi.Mode().Perm() != 0666 {
+		t.Errorf("expected marker mode 0666, got %04o", fi.Mode().Perm())
+	}
+}

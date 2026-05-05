@@ -375,6 +375,123 @@ func createOldFile(t *testing.T, path string) {
 	}
 }
 
+func TestShrinkApplyMarkerPermissionsSameAsSource(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
+	}
+
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0750)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+	}
+
+	res, err := Run(cfg, false, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Offloaded) != 1 {
+		t.Fatalf("expected 1 offloaded file, got %d", len(res.Offloaded))
+	}
+
+	fi, err := os.Stat(path + ".offloaded")
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected marker mode 0750, got %04o", fi.Mode().Perm())
+	}
+}
+
+func TestShrinkApplyMarkerPermissionsExplicitMode(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
+	}
+
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+		MarkerFileMode:  "0666",
+	}
+
+	res, err := Run(cfg, false, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Offloaded) != 1 {
+		t.Fatalf("expected 1 offloaded file, got %d", len(res.Offloaded))
+	}
+
+	fi, err := os.Stat(path + ".offloaded")
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if fi.Mode().Perm() != 0666 {
+		t.Errorf("expected marker mode 0666, got %04o", fi.Mode().Perm())
+	}
+}
+
 func TestRunFromAllProducesSameDryRunResults(t *testing.T) {
 	dir := t.TempDir()
 	setDir := filepath.Join(dir, "set1")
