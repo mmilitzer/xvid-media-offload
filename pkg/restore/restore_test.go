@@ -345,6 +345,144 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 }
 
+func TestRestoreRecreatesMarkerWithSourcePermissions(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	createFile(t, path, "old content")
+	if err := os.Chmod(path, 0750); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-720 * time.Hour)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	createCredentialFile(t, dir, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	origScan := scanForRestore
+	scanForRestore = func(c *config.Config) (*scanner.ScanResult, error) {
+		return &scanner.ScanResult{
+			Files: []scanner.FileInfo{
+				{
+					Path:               path,
+					RelPath:            "set1/4k/video.mp4",
+					Size:               100,
+					RemoteID:           "669872d3d3586a56f9a3dfad",
+					Autograph:          1,
+					MarkerPath:         filepath.Join(setDir, ".htaccess"),
+					ScanRoot:           dir,
+					IsSparse:           true,
+					HasOffloadedMarker: false,
+				},
+			},
+		}, nil
+	}
+	defer func() { scanForRestore = origScan }()
+
+	origDiskCheck := checkDiskSpace
+	checkDiskSpace = func(p string, n int64) (bool, int64, error) {
+		return false, 0, nil
+	}
+	defer func() { checkDiskSpace = origDiskCheck }()
+
+	res, err := Run(cfg, false, 1, nil, &mockDownloader{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.SkippedNoSpace != 1 {
+		t.Errorf("expected 1 skipped no space, got %d", res.SkippedNoSpace)
+	}
+
+	fi, err := os.Stat(path + ".offloaded")
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected marker mode 0750, got %04o", fi.Mode().Perm())
+	}
+}
+
+func TestRestoreRecreatesMarkerWithExplicitMode(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	createOldFile(t, path)
+
+	createCredentialFile(t, dir, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		MarkerFileMode:  "0666",
+	}
+
+	origScan := scanForRestore
+	scanForRestore = func(c *config.Config) (*scanner.ScanResult, error) {
+		return &scanner.ScanResult{
+			Files: []scanner.FileInfo{
+				{
+					Path:               path,
+					RelPath:            "set1/4k/video.mp4",
+					Size:               100,
+					RemoteID:           "669872d3d3586a56f9a3dfad",
+					Autograph:          1,
+					MarkerPath:         filepath.Join(setDir, ".htaccess"),
+					ScanRoot:           dir,
+					IsSparse:           true,
+					HasOffloadedMarker: false,
+				},
+			},
+		}, nil
+	}
+	defer func() { scanForRestore = origScan }()
+
+	origDiskCheck := checkDiskSpace
+	checkDiskSpace = func(p string, n int64) (bool, int64, error) {
+		return false, 0, nil
+	}
+	defer func() { checkDiskSpace = origDiskCheck }()
+
+	res, err := Run(cfg, false, 1, nil, &mockDownloader{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.SkippedNoSpace != 1 {
+		t.Errorf("expected 1 skipped no space, got %d", res.SkippedNoSpace)
+	}
+
+	fi, err := os.Stat(path + ".offloaded")
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if fi.Mode().Perm() != 0666 {
+		t.Errorf("expected marker mode 0666, got %04o", fi.Mode().Perm())
+	}
+}
+
 func TestRestoreMinimumAgeIgnored(t *testing.T) {
 	dir := t.TempDir()
 	setDir := filepath.Join(dir, "set1")

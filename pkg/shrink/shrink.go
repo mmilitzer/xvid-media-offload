@@ -245,7 +245,7 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 
 		// Create .offloaded marker.
 		markerPath := c.Path + ".offloaded"
-		err = os.WriteFile(markerPath, []byte(offloadedMarkerContent), 0644)
+		err = cfg.CreateOffloadedMarker(c.Path, markerPath, []byte(offloadedMarkerContent))
 		if err != nil {
 			res.Errors++
 			msg := fmt.Sprintf("%s: failed to create offloaded marker: %v", c.Path, err)

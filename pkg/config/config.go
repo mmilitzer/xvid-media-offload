@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,7 +27,12 @@ type Config struct {
 	// DownloadTimeout is the global HTTP timeout for file downloads.
 	// When empty or zero, defaults to 6 hours.
 	DownloadTimeout Duration `yaml:"download_timeout"`
-	Verbose         bool     `yaml:"-"` // set from CLI flag
+	// MarkerFileMode controls the permissions of created .offloaded marker files.
+	// When empty or "same-as-source" (the default), markers inherit the
+	// permission bits of the source media file.  Any other value is parsed as
+	// an octal string (e.g. "0666") and applied literally.
+	MarkerFileMode string `yaml:"marker_file_mode"`
+	Verbose        bool   `yaml:"-"` // set from CLI flag
 }
 
 // Load reads and parses a YAML configuration file.
@@ -87,5 +93,53 @@ func (c *Config) Validate() error {
 	if c.DownloadTimeout.Duration() <= 0 {
 		c.DownloadTimeout = Duration(defaultDownloadTimeout)
 	}
+	if err := c.validateMarkerFileMode(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (c *Config) validateMarkerFileMode() error {
+	if c.MarkerFileMode == "" || c.MarkerFileMode == "same-as-source" {
+		return nil
+	}
+	u, err := strconv.ParseUint(c.MarkerFileMode, 8, 32)
+	if err != nil {
+		return fmt.Errorf("config validation failed: marker_file_mode must be \"same-as-source\" or a valid octal mode (e.g. \"0666\"): %w", err)
+	}
+	if u > 0777 {
+		return fmt.Errorf("config validation failed: marker_file_mode %q exceeds maximum permission bits 0777", c.MarkerFileMode)
+	}
+	return nil
+}
+
+// ResolveMarkerFileMode returns the file mode to use for an .offloaded marker
+// based on the source media file and the MarkerFileMode setting.
+func (c *Config) ResolveMarkerFileMode(sourcePath string) (os.FileMode, error) {
+	if c.MarkerFileMode == "" || c.MarkerFileMode == "same-as-source" {
+		fi, err := os.Stat(sourcePath)
+		if err != nil {
+			return 0, err
+		}
+		return fi.Mode() & os.ModePerm, nil
+	}
+	u, err := strconv.ParseUint(c.MarkerFileMode, 8, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid marker_file_mode %q: %w", c.MarkerFileMode, err)
+	}
+	return os.FileMode(u), nil
+}
+
+// CreateOffloadedMarker writes an .offloaded marker file with permissions
+// determined by the configuration.  The mode is applied explicitly with
+// Chmod so that umask does not interfere.
+func (c *Config) CreateOffloadedMarker(sourcePath, markerPath string, content []byte) error {
+	mode, err := c.ResolveMarkerFileMode(sourcePath)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(markerPath, content, mode); err != nil {
+		return err
+	}
+	return os.Chmod(markerPath, mode)
 }

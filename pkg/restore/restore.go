@@ -210,7 +210,7 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 	}
 	if !enough {
 		// Recreate .offloaded marker and skip.
-		err = os.WriteFile(f.Path+".offloaded", []byte(offloadedMarkerContent), 0644)
+		err = cfg.CreateOffloadedMarker(f.Path, f.Path+".offloaded", []byte(offloadedMarkerContent))
 		if err != nil {
 			return RestoreInfo{}, fmt.Errorf("not enough space (%d bytes available) and failed to recreate marker: %w", avail, err)
 		}
