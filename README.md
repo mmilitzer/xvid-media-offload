@@ -181,6 +181,13 @@ ExecStart=/home/myuser/bin/media-offload daemon --config /home/myuser/media-offl
 Restart=on-failure
 RestartSec=10
 
+# Capabilities
+# Preserving the original file modification time after hole punching requires
+# the process to either own the MP4 file or hold CAP_FOWNER. If the daemon
+# user is not the file owner but has group write access, add CAP_FOWNER here.
+AmbientCapabilities=CAP_FOWNER
+CapabilityBoundingSet=CAP_FOWNER
+
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -192,6 +199,8 @@ WantedBy=multi-user.target
 ```
 
 Adjust `User`, `Group`, `ExecStart`, and `ReadWritePaths` to match the owner of your content directories and the location of your config and optional database.
+
+**Permission note:** Linux only allows a process to change the timestamps of a file it does not own if it has the `CAP_FOWNER` capability. Group write permission on the file is **not** sufficient. If the daemon runs as a user that is not the owner of the MP4 files but has group write access, you must grant `CAP_FOWNER` via the systemd unit (as shown above) or by setting the capability on the binary itself with `setcap cap_fowner=+ep /path/to/media-offload`. If `CAP_FOWNER` is missing, offloading still succeeds but the original modification time is lost and an error is logged.
 
 Then create the configuration directory, place your `config.yaml` inside it, and start the service:
 

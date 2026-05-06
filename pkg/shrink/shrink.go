@@ -287,6 +287,27 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 			if cfg.Verbose {
 				fmt.Fprintln(os.Stderr, msg)
 			}
+		} else {
+			// Verify mtime was actually restored (allow filesystem precision differences).
+			var restoredStat unix.Stat_t
+			if err := unix.Stat(c.Path, &restoredStat); err != nil {
+				res.Errors++
+				msg := fmt.Sprintf("%s: unix stat after chtimes failed: %v", c.Path, err)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+			} else {
+				restoredMtime := time.Unix(restoredStat.Mtim.Sec, restoredStat.Mtim.Nsec)
+				if restoredMtime.Sub(origMtime).Abs() > time.Second {
+					res.Errors++
+					msg := fmt.Sprintf("%s: mtime not restored after offload: expected %v, got %v", c.Path, origMtime, restoredMtime)
+					res.ErrorDetails = append(res.ErrorDetails, msg)
+					if cfg.Verbose {
+						fmt.Fprintln(os.Stderr, msg)
+					}
+				}
+			}
 		}
 
 		// Write DB record if configured.
