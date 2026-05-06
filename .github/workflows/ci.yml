@@ -27,10 +27,21 @@ jobs:
         run: go vet ./...
 
       - name: Build binary
-        run: CGO_ENABLED=0 go build -o media-offload ./cmd/media-offload
+        run: |
+          mkdir -p dist
+          VERSION="v0.1.${{ github.run_number }}"
+          COMMIT="${GITHUB_SHA::7}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "\
+              -X 'github.com/mmilitzer/xvid-media-offload/pkg/version.Version=${VERSION}' \
+              -X 'github.com/mmilitzer/xvid-media-offload/pkg/version.Commit=${COMMIT}' \
+              -X 'github.com/mmilitzer/xvid-media-offload/pkg/version.BuiltAt=${BUILT_AT}'" \
+            -o dist/media-offload ./cmd/media-offload
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: media-offload-linux-amd64
-          path: media-offload
+          path: dist/media-offload
