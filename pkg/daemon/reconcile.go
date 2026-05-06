@@ -19,7 +19,7 @@ func (d *Daemon) reconcileDB() error {
 	}
 
 	for _, rec := range records {
-		if !pathUnderScanRoots(rec.LocalPath, d.cfg.ScanRoots) {
+		if _, ok := findScanRootForPath(rec.LocalPath, d.cfg.ScanRoots); !ok {
 			log.Printf("DB reconcile: skipping %s because it is outside active scan_roots", rec.LocalPath)
 			continue
 		}
@@ -29,13 +29,14 @@ func (d *Daemon) reconcileDB() error {
 	return nil
 }
 
-// pathUnderScanRoots reports whether path is contained within any of the
-// configured scan roots using safe path comparison (not a naive string prefix
-// check). Both paths are cleaned and made absolute before comparison.
-func pathUnderScanRoots(path string, roots []string) bool {
+// findScanRootForPath returns the matching clean/absolute scan root for path,
+// or false if none. It uses filepath.Rel instead of naive string prefix
+// matching so that sibling paths such as /site/content2 are not treated as
+// children of /site/content.
+func findScanRootForPath(path string, roots []string) (string, bool) {
 	cleanPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
-		return false
+		return "", false
 	}
 
 	for _, root := range roots {
@@ -50,11 +51,11 @@ func pathUnderScanRoots(path string, roots []string) bool {
 		}
 
 		if rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, "..") {
-			return true
+			return cleanRoot, true
 		}
 	}
 
-	return false
+	return "", false
 }
 
 func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
@@ -97,8 +98,15 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 		return
 	}
 
-	// File is sparse. Walk upward to find the main marker file first.
-	markerPath, markerDir := findMarkerForPath(path, d.cfg.MarkerFilename)
+	scanRoot, ok := findScanRootForPath(path, d.cfg.ScanRoots)
+	if !ok {
+		// This should not happen because reconcileDB already filters, but be safe.
+		log.Printf("DB reconcile: skipping %s because it is outside active scan_roots", path)
+		return
+	}
+
+	// File is sparse. Walk upward to find the main marker file first (bounded by scanRoot).
+	markerPath, markerDir := findMarkerForPathWithin(path, d.cfg.MarkerFilename, scanRoot)
 	mInfo, err := marker.Parse(markerPath)
 	markerValid := err == nil && mInfo.Valid
 	markerHasFileID := false
@@ -147,6 +155,7 @@ func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {
 		Autograph:  rec.Autograph,
 		Size:       rec.OriginalSize,
 		MarkerPath: markerPath,
+		ScanRoot:   scanRoot,
 	}
 	d.enqueueRestoreBlocking(d.ctx, job)
 	log.Printf("DB reconcile: enqueued DB-only restore for %s", path)
