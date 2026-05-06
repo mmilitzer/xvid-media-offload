@@ -98,7 +98,7 @@ func TestResolveRestoreJobFallbackToDB(t *testing.T) {
 	}
 	defer database.Close()
 
-	if err := database.UpsertOffloadedFile(path, "db-remote-id", 0, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "db-remote-id", 0, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -135,7 +135,7 @@ func TestReconcileMissingFile(t *testing.T) {
 	defer database.Close()
 
 	path := filepath.Join(dir, "missing.mp4")
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,7 +153,7 @@ func TestReconcileMissingFile(t *testing.T) {
 	rec := db.OffloadedRecord{LocalPath: path, RemoteFileID: "remote-id", Autograph: 1, OriginalSize: 100}
 	d.reconcileRecord(rec)
 
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(path)
+	_, _, _, _, err = database.GetOffloadedFile(path)
 	if err == nil {
 		t.Error("expected DB record to be removed for missing file")
 	}
@@ -173,7 +173,7 @@ func TestReconcileRestoredFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 12, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 12, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,7 +191,7 @@ func TestReconcileRestoredFile(t *testing.T) {
 	rec := db.OffloadedRecord{LocalPath: path, RemoteFileID: "remote-id", Autograph: 1, OriginalSize: 12}
 	d.reconcileRecord(rec)
 
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(path)
+	_, _, _, _, err = database.GetOffloadedFile(path)
 	if err == nil {
 		t.Error("expected DB record to be removed for restored file")
 	}
@@ -214,7 +214,7 @@ func TestReconcileStillOffloaded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +232,7 @@ func TestReconcileStillOffloaded(t *testing.T) {
 	rec := db.OffloadedRecord{LocalPath: path, RemoteFileID: "remote-id", Autograph: 1, OriginalSize: 100}
 	d.reconcileRecord(rec)
 
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(path)
+	_, _, _, _, err = database.GetOffloadedFile(path)
 	if err != nil {
 		t.Error("expected DB record to remain for still-offloaded file")
 	}
@@ -252,7 +252,7 @@ func TestReconcileDBOnlyRecovery(t *testing.T) {
 
 	// No .offloaded marker, no .htaccess marker.
 
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,7 +289,7 @@ func TestReconcileDryRun(t *testing.T) {
 	defer database.Close()
 
 	path := filepath.Join(dir, "missing.mp4")
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -307,7 +307,7 @@ func TestReconcileDryRun(t *testing.T) {
 	rec := db.OffloadedRecord{LocalPath: path, RemoteFileID: "remote-id", Autograph: 1, OriginalSize: 100}
 	d.reconcileRecord(rec)
 
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(path)
+	_, _, _, _, err = database.GetOffloadedFile(path)
 	if err != nil {
 		t.Error("expected DB record to remain in dry-run mode")
 	}
@@ -568,7 +568,7 @@ func TestReconcileDBOnlyBlockingWithFullQueue(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		paths[i] = filepath.Join(dir, fmt.Sprintf("video%d.mp4", i))
 		createSparseFile(t, paths[i])
-		if err := database.UpsertOffloadedFile(paths[i], fmt.Sprintf("remote-id-%d", i), 1, 100, time.Now(), 0, 0, 0); err != nil {
+		if err := database.UpsertOffloadedFile(paths[i], fmt.Sprintf("remote-id-%d", i), 1, 100, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -715,7 +715,7 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 	defer database.Close()
 
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -780,7 +780,7 @@ RewriteRule "^4k/other.mp4" - [F,L,NC]
 	}
 	defer database.Close()
 
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -840,7 +840,7 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 	defer database.Close()
 
-	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1109,7 +1109,7 @@ func TestResolveRestoreJobOutsideScanRootsNotRestored(t *testing.T) {
 	}
 	defer database.Close()
 
-	if err := database.UpsertOffloadedFile(path, "db-remote-id", 0, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(path, "db-remote-id", 0, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1155,7 +1155,7 @@ func TestReconcileDBSkipsPathsOutsideScanRoots(t *testing.T) {
 
 	// Insert records for all three files (none exist on disk).
 	for _, p := range []string{insidePath, outsidePath, siblingPath} {
-		if err := database.UpsertOffloadedFile(p, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+		if err := database.UpsertOffloadedFile(p, "remote-id", 1, 100, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1176,19 +1176,19 @@ func TestReconcileDBSkipsPathsOutsideScanRoots(t *testing.T) {
 	}
 
 	// Inside path: file is missing, so reconcileRecord should delete the DB row.
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(insidePath)
+	_, _, _, _, err = database.GetOffloadedFile(insidePath)
 	if err == nil {
 		t.Error("expected DB record for inside path to be removed because file is missing")
 	}
 
 	// Outside path: should be skipped, DB row must remain.
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(outsidePath)
+	_, _, _, _, err = database.GetOffloadedFile(outsidePath)
 	if err != nil {
 		t.Errorf("expected DB record for outside path to be preserved, got error: %v", err)
 	}
 
 	// Sibling path: should be skipped, DB row must remain.
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(siblingPath)
+	_, _, _, _, err = database.GetOffloadedFile(siblingPath)
 	if err != nil {
 		t.Errorf("expected DB record for sibling path to be preserved, got error: %v", err)
 	}
@@ -1230,7 +1230,7 @@ func TestReconcileDBPreservesOffloadedMarkerOutsideScanRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := database.UpsertOffloadedFile(siblingPath, "remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
+	if err := database.UpsertOffloadedFile(siblingPath, "remote-id", 1, 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1255,7 +1255,7 @@ func TestReconcileDBPreservesOffloadedMarkerOutsideScanRoots(t *testing.T) {
 	}
 
 	// DB row must also remain.
-	_, _, _, _, _, _, _, err = database.GetOffloadedFile(siblingPath)
+	_, _, _, _, err = database.GetOffloadedFile(siblingPath)
 	if err != nil {
 		t.Errorf("expected DB record to be preserved, got error: %v", err)
 	}

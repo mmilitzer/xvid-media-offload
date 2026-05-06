@@ -51,6 +51,7 @@ type Job struct {
 	Credentials *credentials.Credentials
 	OrigUID     int
 	OrigGID     int
+	OrigMode    os.FileMode
 }
 
 // Run scans for restore candidates and restores them using a worker pool.
@@ -75,17 +76,12 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 	var jobs []Job
 	for _, f := range scanRes.Files {
 		remoteID := f.RemoteID
-		var dbUID, dbGID int
-		var dbMode uint32
 
 		// Fallback to DB if no remote ID from marker.
 		if remoteID == "" && database != nil {
-			dbRemoteID, _, _, _, uid, gid, mode, dbErr := database.GetOffloadedFile(f.Path)
+			dbRemoteID, _, _, _, dbErr := database.GetOffloadedFile(f.Path)
 			if dbErr == nil {
 				remoteID = dbRemoteID
-				dbUID = uid
-				dbGID = gid
-				dbMode = mode
 			}
 		}
 
@@ -99,21 +95,31 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 			continue
 		}
 
-		// Capture original ownership for restore if allow-owner-mismatch is active.
+		// Stat the current sparse file to capture original ownership/mode from disk.
 		var origUID, origGID int
-		if cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch {
-			if dbUID != 0 || dbGID != 0 {
-				origUID = dbUID
-				origGID = dbGID
-			} else {
-				var stat unix.Stat_t
-				if err := unix.Stat(f.Path, &stat); err == nil {
-					origUID = int(stat.Uid)
-					origGID = int(stat.Gid)
+		var origMode os.FileMode
+		var stat unix.Stat_t
+		if err := unix.Stat(f.Path, &stat); err != nil {
+			if os.IsNotExist(err) {
+				res.Errors++
+				msg := fmt.Sprintf("%s: sparse MP4 does not exist on disk, skipping restore", f.Path)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
 				}
+				continue
 			}
-			_ = dbMode // used implicitly if we need mode, but chmod already preserves mode
+			res.Errors++
+			msg := fmt.Sprintf("%s: stat failed before restore: %v", f.Path, err)
+			res.ErrorDetails = append(res.ErrorDetails, msg)
+			if cfg.Verbose {
+				fmt.Fprintln(os.Stderr, msg)
+			}
+			continue
 		}
+		origUID = int(stat.Uid)
+		origGID = int(stat.Gid)
+		origMode = os.FileMode(stat.Mode) & os.ModePerm
 
 		if dryRun {
 			res.Queued++
@@ -148,6 +154,7 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 			Credentials: creds,
 			OrigUID:     origUID,
 			OrigGID:     origGID,
+			OrigMode:    origMode,
 		})
 		res.Queued++
 	}
@@ -197,11 +204,19 @@ func RestoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
 	f := job.File
 
+	// Guard against missing sparse file.
+	if _, err := os.Stat(f.Path); err != nil {
+		if os.IsNotExist(err) {
+			return RestoreInfo{}, fmt.Errorf("%s: sparse MP4 does not exist on disk, skipping restore", f.Path)
+		}
+		return RestoreInfo{}, fmt.Errorf("%s: stat failed before restore: %w", f.Path, err)
+	}
+
 	// Resolve remote ID and autograph again inside worker.
 	remoteID := f.RemoteID
 	autograph := f.Autograph
 	if remoteID == "" && database != nil {
-		dbRemoteID, dbAutograph, _, _, _, _, _, dbErr := database.GetOffloadedFile(f.Path)
+		dbRemoteID, dbAutograph, _, _, dbErr := database.GetOffloadedFile(f.Path)
 		if dbErr == nil {
 			remoteID = dbRemoteID
 			autograph = dbAutograph
@@ -274,8 +289,8 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 	}
 
 	// Preserve the original file's permissions on the temp file before rename.
-	if origInfo, statErr := os.Stat(f.Path); statErr == nil {
-		if chmodErr := os.Chmod(tempPath, origInfo.Mode()); chmodErr != nil {
+	if job.OrigMode != 0 {
+		if chmodErr := os.Chmod(tempPath, job.OrigMode); chmodErr != nil {
 			os.Remove(tempPath)
 			return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
 		}

@@ -384,7 +384,7 @@ RewriteRule "^video.mp4" - [F,L,NC]
 #file_id=669872d3d3586a56f9a3dfad
 `)
 	createOldFile(t, filepath.Join(setDir, "video.mp4"))
-	staleTmp := filepath.Join(setDir, "video.mp4.sparse-tmp.")
+	staleTmp := filepath.Join(setDir, "video.mp4.sparse-tmp.abc123")
 	if err := os.WriteFile(staleTmp, []byte("stale"), 0644); err != nil {
 		t.Fatal(err)
 	}

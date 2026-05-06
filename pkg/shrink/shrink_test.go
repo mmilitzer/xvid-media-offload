@@ -675,7 +675,7 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 
 	// Verify DB offloaded_at records offload time.
-	_, _, _, offloadedAt, _, _, _, err := database.GetOffloadedFile(path)
+	_, _, _, offloadedAt, err := database.GetOffloadedFile(path)
 	if err != nil {
 		t.Fatalf("unexpected error getting db record: %v", err)
 	}
@@ -879,7 +879,7 @@ func TestShrinkReplaceStrategyCleansStaleTmp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "video.mp4")
 	createLargeOldFile(t, path)
-	staleTmp := path + ".sparse-tmp."
+	staleTmp := path + ".sparse-tmp.abc123"
 	if err := os.WriteFile(staleTmp, []byte("stale"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -918,9 +918,43 @@ func TestShrinkReplaceStrategyCleansStaleTmp(t *testing.T) {
 	}
 
 	// Stale tmp should still exist after dry-run (cleanup only happens during scan).
-	// We verify that CleanStaleSparseTmp works by calling it directly.
-	CleanStaleSparseTmp(dir)
+	// We verify that CleanStaleSparseTmp works by calling it directly with the MP4 path.
+	CleanStaleSparseTmp(path)
 	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
 		t.Errorf("expected stale sparse-tmp to be deleted")
+	}
+}
+
+func TestCleanStaleSparseTmpDoesNotTouchUnrelatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	createLargeOldFile(t, path)
+
+	// Unrelated files that merely contain "sparse-tmp" in their name.
+	unrelated1 := filepath.Join(dir, "video.mp4.sparse-tmp-backup")
+	unrelated2 := filepath.Join(dir, "my-sparse-tmp-file.txt")
+	if err := os.WriteFile(unrelated1, []byte("backup"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrelated2, []byte("other"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real stale temp that should be removed.
+	staleTmp := path + ".sparse-tmp.stale-id"
+	if err := os.WriteFile(staleTmp, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	CleanStaleSparseTmp(path)
+
+	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
+		t.Errorf("expected stale sparse-tmp to be deleted")
+	}
+	if _, err := os.Stat(unrelated1); err != nil {
+		t.Errorf("expected unrelated backup file to be untouched: %v", err)
+	}
+	if _, err := os.Stat(unrelated2); err != nil {
+		t.Errorf("expected unrelated file to be untouched: %v", err)
 	}
 }

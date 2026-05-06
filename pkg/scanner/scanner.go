@@ -278,9 +278,6 @@ func scanRootAll(root string, cfg *config.Config, res *ScanResult) error {
 		}
 		res.ValidMarkers++
 
-		// Clean up any stale sparse-tmp files in managed directories.
-		cleanStaleSparseTmp(dirPath)
-
 		for _, pattern := range mInfo.Patterns {
 			relPath := literalPathFromRegex(pattern)
 
@@ -313,6 +310,9 @@ func scanRootAll(root string, cfg *config.Config, res *ScanResult) error {
 			}
 
 			absPath := filepath.Join(dirPath, filepath.FromSlash(relPath))
+
+			// Clean up any stale sparse replacement temp files next to this MP4.
+			cleanStaleSparseTmp(absPath)
 
 			fileInfo, err := os.Stat(absPath)
 			var size int64 = -1
@@ -405,15 +405,21 @@ func dirsAtDepth(root string, depth int) ([]string, error) {
 	return dirs, nil
 }
 
-// cleanStaleSparseTmp removes any stale *.sparse-tmp. files in a directory.
-func cleanStaleSparseTmp(dirPath string) {
-	entries, err := os.ReadDir(dirPath)
+// cleanStaleSparseTmp removes stale sparse replacement temp files next to an MP4.
+// It looks in mp4Path's parent directory for entries matching
+// <basename>.sparse-tmp.* and deletes them.
+func cleanStaleSparseTmp(mp4Path string) {
+	dir := filepath.Dir(mp4Path)
+	base := filepath.Base(mp4Path)
+	prefix := base + ".sparse-tmp."
+
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".sparse-tmp.") {
-			_ = os.Remove(filepath.Join(dirPath, e.Name()))
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 }

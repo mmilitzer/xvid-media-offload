@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/punch"
@@ -371,7 +372,7 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 		// Write DB record if configured.
 		dbStatus := "skipped (no database configured)"
 		if database != nil {
-			err = database.UpsertOffloadedFile(c.Path, c.RemoteID, c.Autograph, c.Size, time.Now(), c.UID, c.GID, uint32(c.Mode))
+			err = database.UpsertOffloadedFile(c.Path, c.RemoteID, c.Autograph, c.Size, time.Now())
 			if err != nil {
 				dbStatus = fmt.Sprintf("error: %v", err)
 				res.ErrorDetails = append(res.ErrorDetails, fmt.Sprintf("%s: DB write failed: %v", c.Path, err))
@@ -421,8 +422,8 @@ func replaceFileWithSparseCopy(c scanner.Candidate, cfg *config.Config, origAtim
 		return "", fmt.Errorf("hardlinked files with link count > 1 are not supported")
 	}
 
-	// 4. create temp sparse replacement
-	tempPath := c.Path + sparseTmpSuffix
+	// 4. create temp sparse replacement with unique name
+	tempPath := c.Path + sparseTmpSuffix + uuid.NewString()
 	tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
@@ -503,15 +504,21 @@ func replaceFileWithSparseCopy(c scanner.Candidate, cfg *config.Config, origAtim
 	return markerPath, nil
 }
 
-// CleanStaleSparseTmp removes any stale *.sparse-tmp. files found during scanning.
-func CleanStaleSparseTmp(dirPath string) {
-	entries, err := os.ReadDir(dirPath)
+// CleanStaleSparseTmp removes stale sparse replacement temp files next to an MP4.
+// It looks in mp4Path's parent directory for entries matching
+// <basename>.sparse-tmp.* and deletes them.
+func CleanStaleSparseTmp(mp4Path string) {
+	dir := filepath.Dir(mp4Path)
+	base := filepath.Base(mp4Path)
+	prefix := base + sparseTmpSuffix
+
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), sparseTmpSuffix) {
-			_ = os.Remove(filepath.Join(dirPath, e.Name()))
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 }
