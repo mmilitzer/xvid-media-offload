@@ -467,3 +467,52 @@ func TestCreateOffloadedMarkerExplicitMode(t *testing.T) {
 		t.Errorf("expected marker mode 0666, got %04o", fi.Mode().Perm())
 	}
 }
+
+func TestValidateOwnershipPolicyDefault(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OwnershipPolicy != OwnershipPolicyRequireDaemonOwner {
+		t.Errorf("expected default ownership_policy %q, got %q", OwnershipPolicyRequireDaemonOwner, cfg.OwnershipPolicy)
+	}
+}
+
+func TestValidateOwnershipPolicyExplicit(t *testing.T) {
+	for _, policy := range []string{OwnershipPolicyRequireDaemonOwner, OwnershipPolicyAllowOwnerMismatch, OwnershipPolicyReplaceWithDaemonOwnedSparse} {
+		cfg := &Config{
+			ScanRoots:       []string{"/tmp"},
+			CandidateGlobs:  []string{"**/*.mp4"},
+			MarkerFilename:  ".htaccess",
+			MinimumAge:      Duration(1 * time.Hour),
+			KeepPrefixBytes: 1,
+			OwnershipPolicy: policy,
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("unexpected error for policy %q: %v", policy, err)
+		}
+		if cfg.OwnershipPolicy != policy {
+			t.Errorf("expected ownership_policy %q, got %q", policy, cfg.OwnershipPolicy)
+		}
+	}
+}
+
+func TestValidateOwnershipPolicyInvalid(t *testing.T) {
+	cfg := &Config{
+		ScanRoots:       []string{"/tmp"},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: "invalid-policy",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid ownership_policy")
+	}
+}

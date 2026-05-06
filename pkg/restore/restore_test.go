@@ -185,7 +185,7 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	defer database.Close()
 
 	// Insert fallback record.
-	if err := database.UpsertOffloadedFile(path, "db-remote-id", 1, 100, time.Now()); err != nil {
+	if err := database.UpsertOffloadedFile(path, "db-remote-id", 1, 100, time.Now(), 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 

@@ -485,7 +485,7 @@ func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
 	}
 
 	if remoteID == "" && d.database != nil {
-		if dbRemoteID, dbAutograph, dbSize, _, err := d.database.GetOffloadedFile(path); err == nil {
+		if dbRemoteID, dbAutograph, dbSize, _, _, _, _, err := d.database.GetOffloadedFile(path); err == nil {
 			remoteID = dbRemoteID
 			autograph = dbAutograph
 			size = dbSize

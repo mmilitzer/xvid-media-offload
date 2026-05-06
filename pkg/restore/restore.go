@@ -49,6 +49,8 @@ type Result struct {
 type Job struct {
 	File        scanner.FileInfo
 	Credentials *credentials.Credentials
+	OrigUID     int
+	OrigGID     int
 }
 
 // Run scans for restore candidates and restores them using a worker pool.
@@ -73,12 +75,17 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 	var jobs []Job
 	for _, f := range scanRes.Files {
 		remoteID := f.RemoteID
+		var dbUID, dbGID int
+		var dbMode uint32
 
 		// Fallback to DB if no remote ID from marker.
 		if remoteID == "" && database != nil {
-			dbRemoteID, _, _, _, dbErr := database.GetOffloadedFile(f.Path)
+			dbRemoteID, _, _, _, uid, gid, mode, dbErr := database.GetOffloadedFile(f.Path)
 			if dbErr == nil {
 				remoteID = dbRemoteID
+				dbUID = uid
+				dbGID = gid
+				dbMode = mode
 			}
 		}
 
@@ -90,6 +97,22 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 				fmt.Fprintln(os.Stderr, msg)
 			}
 			continue
+		}
+
+		// Capture original ownership for restore if allow-owner-mismatch is active.
+		var origUID, origGID int
+		if cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch {
+			if dbUID != 0 || dbGID != 0 {
+				origUID = dbUID
+				origGID = dbGID
+			} else {
+				var stat unix.Stat_t
+				if err := unix.Stat(f.Path, &stat); err == nil {
+					origUID = int(stat.Uid)
+					origGID = int(stat.Gid)
+				}
+			}
+			_ = dbMode // used implicitly if we need mode, but chmod already preserves mode
 		}
 
 		if dryRun {
@@ -123,6 +146,8 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 		jobs = append(jobs, Job{
 			File:        f,
 			Credentials: creds,
+			OrigUID:     origUID,
+			OrigGID:     origGID,
 		})
 		res.Queued++
 	}
@@ -176,7 +201,7 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 	remoteID := f.RemoteID
 	autograph := f.Autograph
 	if remoteID == "" && database != nil {
-		dbRemoteID, dbAutograph, _, _, dbErr := database.GetOffloadedFile(f.Path)
+		dbRemoteID, dbAutograph, _, _, _, _, _, dbErr := database.GetOffloadedFile(f.Path)
 		if dbErr == nil {
 			remoteID = dbRemoteID
 			autograph = dbAutograph
@@ -253,6 +278,17 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 		if chmodErr := os.Chmod(tempPath, origInfo.Mode()); chmodErr != nil {
 			os.Remove(tempPath)
 			return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
+		}
+	}
+
+	// For allow-owner-mismatch, attempt to restore original owner before rename.
+	if cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch && (job.OrigUID != 0 || job.OrigGID != 0) {
+		if chownErr := os.Chown(tempPath, job.OrigUID, job.OrigGID); chownErr != nil {
+			// Log but do not fail the restore.
+			msg := fmt.Sprintf("%s: failed to restore original owner (%d:%d): %v", f.Path, job.OrigUID, job.OrigGID, chownErr)
+			if cfg.Verbose {
+				fmt.Fprintln(os.Stderr, msg)
+			}
 		}
 	}
 

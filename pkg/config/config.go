@@ -9,6 +9,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Ownership policy constants.
+const (
+	OwnershipPolicyRequireDaemonOwner           = "require-daemon-owner"
+	OwnershipPolicyAllowOwnerMismatch           = "allow-owner-mismatch"
+	OwnershipPolicyReplaceWithDaemonOwnedSparse = "replace-with-daemon-owned-sparse-copy"
+)
+
 // Config holds the application configuration.
 type Config struct {
 	ScanRoots       []string `yaml:"scan_roots"`
@@ -32,7 +39,13 @@ type Config struct {
 	// permission bits of the source media file.  Any other value is parsed as
 	// an octal string (e.g. "0666") and applied literally.
 	MarkerFileMode string `yaml:"marker_file_mode"`
-	Verbose        bool   `yaml:"-"` // set from CLI flag
+	// OwnershipPolicy controls how the tool handles MP4 files that are not
+	// owned by the user running the daemon.
+	//   require-daemon-owner           - only offload files owned by the daemon user (default)
+	//   allow-owner-mismatch           - allow offloading non-owned files with best-effort preservation
+	//   replace-with-daemon-owned-sparse-copy - replace non-owned files with a daemon-owned sparse copy
+	OwnershipPolicy string `yaml:"ownership_policy"`
+	Verbose         bool   `yaml:"-"` // set from CLI flag
 }
 
 // Load reads and parses a YAML configuration file.
@@ -96,7 +109,24 @@ func (c *Config) Validate() error {
 	if err := c.validateMarkerFileMode(); err != nil {
 		return err
 	}
+	if err := c.validateOwnershipPolicy(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (c *Config) validateOwnershipPolicy() error {
+	if c.OwnershipPolicy == "" {
+		c.OwnershipPolicy = OwnershipPolicyRequireDaemonOwner
+		return nil
+	}
+	switch c.OwnershipPolicy {
+	case OwnershipPolicyRequireDaemonOwner, OwnershipPolicyAllowOwnerMismatch, OwnershipPolicyReplaceWithDaemonOwnedSparse:
+		return nil
+	default:
+		return fmt.Errorf("config validation failed: ownership_policy must be one of %q, %q, or %q",
+			OwnershipPolicyRequireDaemonOwner, OwnershipPolicyAllowOwnerMismatch, OwnershipPolicyReplaceWithDaemonOwnedSparse)
+	}
 }
 
 func (c *Config) validateMarkerFileMode() error {

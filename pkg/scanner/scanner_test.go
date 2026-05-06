@@ -375,6 +375,38 @@ RewriteRule "^video.mp4" - [F,L,NC]
 	}
 }
 
+func TestScanCleansStaleSparseTmp(t *testing.T) {
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createOldFile(t, filepath.Join(setDir, "video.mp4"))
+	staleTmp := filepath.Join(setDir, "video.mp4.sparse-tmp.")
+	if err := os.WriteFile(staleTmp, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+	}
+
+	_, err := Scan(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
+		t.Errorf("expected stale sparse-tmp to be deleted, but it still exists")
+	}
+}
+
 func TestScanForRestoreIgnoresNonSparse(t *testing.T) {
 	dir := t.TempDir()
 	setDir := filepath.Join(dir, "set1")
