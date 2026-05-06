@@ -870,64 +870,263 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 }
 
-func TestPathUnderScanRoots(t *testing.T) {
+func TestFindScanRootForPath_Table(t *testing.T) {
 	tests := []struct {
-		name   string
-		path   string
-		roots  []string
-		want   bool
+		name      string
+		path      string
+		roots     []string
+		wantFound bool
 	}{
 		{
-			name:  "path inside scan root",
-			path:  "/site/content/video.mp4",
-			roots: []string{"/site/content"},
-			want:  true,
+			name:      "path inside scan root",
+			path:      "/site/content/video.mp4",
+			roots:     []string{"/site/content"},
+			wantFound: true,
 		},
 		{
-			name:  "path outside scan root",
-			path:  "/other/video.mp4",
-			roots: []string{"/site/content"},
-			want:  false,
+			name:      "path outside scan root",
+			path:      "/other/video.mp4",
+			roots:     []string{"/site/content"},
+			wantFound: false,
 		},
 		{
-			name:  "sibling path prefix does not match",
-			path:  "/site/content2/video.mp4",
-			roots: []string{"/site/content"},
-			want:  false,
+			name:      "sibling path prefix does not match",
+			path:      "/site/content2/video.mp4",
+			roots:     []string{"/site/content"},
+			wantFound: false,
 		},
 		{
-			name:  "exact scan root path",
-			path:  "/site/content",
-			roots: []string{"/site/content"},
-			want:  true,
+			name:      "exact scan root path",
+			path:      "/site/content",
+			roots:     []string{"/site/content"},
+			wantFound: true,
 		},
 		{
-			name:  "parent path does not match",
-			path:  "/site",
-			roots: []string{"/site/content"},
-			want:  false,
+			name:      "parent path does not match",
+			path:      "/site",
+			roots:     []string{"/site/content"},
+			wantFound: false,
 		},
 		{
-			name:  "multiple roots second matches",
-			path:  "/site/b/video.mp4",
-			roots: []string{"/site/a", "/site/b"},
-			want:  true,
+			name:      "multiple roots second matches",
+			path:      "/site/b/video.mp4",
+			roots:     []string{"/site/a", "/site/b"},
+			wantFound: true,
 		},
 		{
-			name:  "trailing slash in root",
-			path:  "/site/content/video.mp4",
-			roots: []string{"/site/content/"},
-			want:  true,
+			name:      "trailing slash in root",
+			path:      "/site/content/video.mp4",
+			roots:     []string{"/site/content/"},
+			wantFound: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := pathUnderScanRoots(tt.path, tt.roots)
-			if got != tt.want {
-				t.Errorf("pathUnderScanRoots(%q, %v) = %v, want %v", tt.path, tt.roots, got, tt.want)
+			_, got := findScanRootForPath(tt.path, tt.roots)
+			if got != tt.wantFound {
+				t.Errorf("findScanRootForPath(%q, %v) found = %v, want %v", tt.path, tt.roots, got, tt.wantFound)
 			}
 		})
+	}
+}
+
+func TestFindScanRootForPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		roots     []string
+		wantRoot  string
+		wantFound bool
+	}{
+		{
+			name:      "path inside scan root",
+			path:      "/site/content/video.mp4",
+			roots:     []string{"/site/content"},
+			wantRoot:  "/site/content",
+			wantFound: true,
+		},
+		{
+			name:      "sibling path prefix does not match",
+			path:      "/site/content2/video.mp4",
+			roots:     []string{"/site/content"},
+			wantRoot:  "",
+			wantFound: false,
+		},
+		{
+			name:      "multiple roots second matches",
+			path:      "/site/b/video.mp4",
+			roots:     []string{"/site/a", "/site/b"},
+			wantRoot:  "/site/b",
+			wantFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRoot, gotFound := findScanRootForPath(tt.path, tt.roots)
+			if gotFound != tt.wantFound {
+				t.Errorf("findScanRootForPath(%q, %v) found = %v, want %v", tt.path, tt.roots, gotFound, tt.wantFound)
+			}
+			if gotFound && gotRoot != tt.wantRoot {
+				t.Errorf("findScanRootForPath(%q, %v) root = %q, want %q", tt.path, tt.roots, gotRoot, tt.wantRoot)
+			}
+		})
+	}
+}
+
+func TestFindMarkerForPathWithinIgnoresMarkerAboveScanRoot(t *testing.T) {
+	dir := t.TempDir()
+	// Marker is in the parent of the scan root.
+	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	scanRoot := filepath.Join(dir, "content")
+	if err := os.MkdirAll(scanRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(scanRoot, "video.mp4")
+	createOldFile(t, path)
+
+	markerPath, markerDir := findMarkerForPathWithin(path, ".htaccess", scanRoot)
+	if markerPath != "" || markerDir != "" {
+		t.Errorf("expected no marker found above scan_root, got path=%q dir=%q", markerPath, markerDir)
+	}
+}
+
+func TestFindMarkerForPathWithinFindsMarkerInsideScanRoot(t *testing.T) {
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	createMarker(t, scanRoot, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(scanRoot, "video.mp4")
+	createOldFile(t, path)
+
+	markerPath, markerDir := findMarkerForPathWithin(path, ".htaccess", scanRoot)
+	wantMarker := filepath.Join(scanRoot, ".htaccess")
+	if markerPath != wantMarker {
+		t.Errorf("expected marker path %q, got %q", wantMarker, markerPath)
+	}
+	if markerDir != scanRoot {
+		t.Errorf("expected marker dir %q, got %q", scanRoot, markerDir)
+	}
+}
+
+func TestResolveRestoreJobIgnoresMarkerAboveScanRoot(t *testing.T) {
+	dir := t.TempDir()
+	// Marker is in the parent of the scan root.
+	createMarker(t, dir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^content/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	scanRoot := filepath.Join(dir, "content")
+	if err := os.MkdirAll(scanRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(scanRoot, "video.mp4")
+	createOldFile(t, path)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, nil, nil)
+	job, ok := d.resolveRestoreJob(path)
+	if ok {
+		t.Fatalf("expected resolve to fail because marker is above scan_root, got job=%+v", job)
+	}
+}
+
+func TestResolveRestoreJobFindsMarkerInsideScanRoot(t *testing.T) {
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	createMarker(t, scanRoot, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(scanRoot, "video.mp4")
+	createOldFile(t, path)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, nil, nil)
+	job, ok := d.resolveRestoreJob(path)
+	if !ok {
+		t.Fatal("expected resolve to succeed")
+	}
+	if job.RemoteID != "669872d3d3586a56f9a3dfad" {
+		t.Errorf("unexpected remote id: %s", job.RemoteID)
+	}
+	if job.ScanRoot != scanRoot {
+		t.Errorf("unexpected scan root: %s", job.ScanRoot)
+	}
+}
+
+func TestResolveRestoreJobOutsideScanRootsNotRestored(t *testing.T) {
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	outsideDir := filepath.Join(dir, "other")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(outsideDir, "video.mp4")
+	createOldFile(t, path)
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.UpsertOffloadedFile(path, "db-remote-id", 0, 100, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, database, nil)
+	job, ok := d.resolveRestoreJob(path)
+	if ok {
+		t.Fatalf("expected resolve to fail for path outside scan roots, got job=%+v", job)
 	}
 }
 

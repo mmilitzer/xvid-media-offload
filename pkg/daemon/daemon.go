@@ -406,13 +406,40 @@ func (d *Daemon) combinedScan() {
 	}
 }
 
-// findMarkerForPath walks upward from the file's directory looking for the
-// configured marker file. It returns the marker path and the directory it was
-// found in.
-func findMarkerForPath(path string, markerFilename string) (markerPath string, markerDir string) {
-	dir := filepath.Dir(path)
+// findMarkerForPathWithin walks upward from the file's directory looking for
+// the configured marker file, but never searches above scanRoot. It returns
+// the marker path and the directory it was found in.
+func findMarkerForPathWithin(path string, markerFilename string, scanRoot string) (markerPath string, markerDir string) {
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", ""
+	}
+	cleanRoot, err := filepath.Abs(filepath.Clean(scanRoot))
+	if err != nil {
+		return "", ""
+	}
+
+	// Verify path is under scanRoot.
+	rel, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil {
+		return "", ""
+	}
+	if rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") {
+		return "", ""
+	}
+
+	dir := filepath.Dir(cleanPath)
 	searchDir := dir
 	for {
+		// Don't search above scanRoot.
+		relSearch, err := filepath.Rel(cleanRoot, searchDir)
+		if err != nil {
+			return "", ""
+		}
+		if relSearch == ".." || filepath.IsAbs(relSearch) || strings.HasPrefix(relSearch, "..") {
+			return "", ""
+		}
+
 		candidate := filepath.Join(searchDir, markerFilename)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate, searchDir
@@ -427,9 +454,18 @@ func findMarkerForPath(path string, markerFilename string) (markerPath string, m
 }
 
 // resolveRestoreJob attempts to build a restoreJob for a file path by reading
-// the marker file in its ancestor directories. It falls back to the DB if needed.
+// the marker file in its ancestor directories (bounded by the matching scan
+// root). It falls back to the DB if the marker does not contain the file.
+// If the path is outside all configured scan roots, no restore is triggered.
 func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
-	markerPath, markerDir := findMarkerForPath(path, d.cfg.MarkerFilename)
+	scanRoot, ok := findScanRootForPath(path, d.cfg.ScanRoots)
+	if !ok {
+		// No active scan_root matches. Behave consistently with startup DB
+		// reconciliation, which skips records outside scan roots entirely.
+		return restoreJob{}, false
+	}
+
+	markerPath, markerDir := findMarkerForPathWithin(path, d.cfg.MarkerFilename, scanRoot)
 
 	var remoteID string
 	var autograph int = -1
@@ -463,16 +499,6 @@ func (d *Daemon) resolveRestoreJob(path string) (restoreJob, bool) {
 	if size == 0 {
 		if fi, err := os.Stat(path); err == nil {
 			size = fi.Size()
-		}
-	}
-
-	// Determine scan root.
-	scanRoot := ""
-	for _, root := range d.cfg.ScanRoots {
-		root = filepath.Clean(root)
-		if strings.HasPrefix(path, root+string(filepath.Separator)) {
-			scanRoot = root
-			break
 		}
 	}
 
