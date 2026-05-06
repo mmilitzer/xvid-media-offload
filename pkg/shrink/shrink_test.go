@@ -9,6 +9,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
+	"golang.org/x/sys/unix"
 )
 
 func TestShrinkDryRunDoesNotModify(t *testing.T) {
@@ -544,5 +545,110 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 	if resFromAll.SkippedMissingRemote != resRun.SkippedMissingRemote {
 		t.Errorf("SkippedMissingRemote mismatch: %d vs %d", resFromAll.SkippedMissingRemote, resRun.SkippedMissingRemote)
+	}
+}
+
+func TestShrinkApplyPreservesMtime(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
+	}
+
+	dir := t.TempDir()
+	setDir := filepath.Join(dir, "set1")
+	createMarker(t, setDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^4k/video.mp4" - [F,L,NC]
+#autograph=1
+#file_id=669872d3d3586a56f9a3dfad
+`)
+
+	path := filepath.Join(setDir, "4k", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Set an old, specific mtime/atime.
+	oldTime := time.Date(2020, 1, 15, 10, 30, 0, 0, time.UTC)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+	}
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	beforeOffload := time.Now()
+	res, err := Run(cfg, false, database)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Offloaded) != 1 {
+		t.Fatalf("expected 1 offloaded file, got %d", len(res.Offloaded))
+	}
+
+	// Verify MP4 mtime is preserved.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stat mp4: %v", err)
+	}
+	if !fi.ModTime().Equal(oldTime) {
+		t.Errorf("expected MP4 mtime %v, got %v", oldTime, fi.ModTime())
+	}
+
+	// Verify MP4 atime is preserved.
+	var stat unix.Stat_t
+	if err := unix.Stat(path, &stat); err != nil {
+		t.Fatalf("unexpected error unix stat mp4: %v", err)
+	}
+	atime := time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
+	if !atime.Equal(oldTime) {
+		t.Errorf("expected MP4 atime %v, got %v", oldTime, atime)
+	}
+
+	// Verify .offloaded marker has newer mtime.
+	mfi, err := os.Stat(path + ".offloaded")
+	if err != nil {
+		t.Fatalf("unexpected error stat marker: %v", err)
+	}
+	if !mfi.ModTime().After(oldTime) {
+		t.Errorf("expected marker mtime after %v, got %v", oldTime, mfi.ModTime())
+	}
+	if !mfi.ModTime().After(beforeOffload.Add(-1 * time.Second)) {
+		t.Errorf("expected marker mtime around offload time, got %v (before %v)", mfi.ModTime(), beforeOffload)
+	}
+
+	// Verify DB offloaded_at records offload time.
+	_, _, _, offloadedAt, err := database.GetOffloadedFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error getting db record: %v", err)
+	}
+	if !offloadedAt.After(oldTime) {
+		t.Errorf("expected DB offloaded_at after %v, got %v", oldTime, offloadedAt)
+	}
+	if !offloadedAt.After(beforeOffload.Add(-1 * time.Second)) {
+		t.Errorf("expected DB offloaded_at around offload time, got %v (before %v)", offloadedAt, beforeOffload)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/punch"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
 	"github.com/mmilitzer/xvid-media-offload/pkg/sparse"
+	"golang.org/x/sys/unix"
 )
 
 // OffloadInfo holds details about a successfully offloaded file.
@@ -119,6 +120,16 @@ func RunFromAll(cfg *config.Config, dryRun bool, database *db.DB, all *scanner.S
 	return processCandidates(cfg, dryRun, database, candidates, res)
 }
 
+func getFileTimestamps(path string) (atime, mtime time.Time, err error) {
+	var stat unix.Stat_t
+	if err := unix.Stat(path, &stat); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	atime = time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
+	mtime = time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)
+	return atime, mtime, nil
+}
+
 func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candidates []scanner.Candidate, res *Result) (*Result, error) {
 	for _, c := range candidates {
 		// Skip files that are too small.
@@ -190,6 +201,18 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 			continue
 		}
 
+		// Store original timestamps before hole punching.
+		origAtime, origMtime, err := getFileTimestamps(c.Path)
+		if err != nil {
+			res.Errors++
+			msg := fmt.Sprintf("%s: stat before punch failed: %v", c.Path, err)
+			res.ErrorDetails = append(res.ErrorDetails, msg)
+			if cfg.Verbose {
+				fmt.Fprintln(os.Stderr, msg)
+			}
+			continue
+		}
+
 		err = punch.PunchHole(c.Path, cfg.KeepPrefixBytes)
 		if err != nil {
 			res.Errors++
@@ -254,6 +277,16 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 				fmt.Fprintln(os.Stderr, msg)
 			}
 			continue
+		}
+
+		// Restore original timestamps so the MP4 keeps its original modified time.
+		if err := os.Chtimes(c.Path, origAtime, origMtime); err != nil {
+			res.Errors++
+			msg := fmt.Sprintf("%s: failed to restore original timestamps: %v", c.Path, err)
+			res.ErrorDetails = append(res.ErrorDetails, msg)
+			if cfg.Verbose {
+				fmt.Fprintln(os.Stderr, msg)
+			}
 		}
 
 		// Write DB record if configured.
