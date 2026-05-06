@@ -204,12 +204,28 @@ func RestoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
 	f := job.File
 
-	// Guard against missing sparse file.
-	if _, err := os.Stat(f.Path); err != nil {
+	// Guard against missing sparse file and capture current ownership/mode from disk.
+	var stat unix.Stat_t
+	if err := unix.Stat(f.Path, &stat); err != nil {
 		if os.IsNotExist(err) {
 			return RestoreInfo{}, fmt.Errorf("%s: sparse MP4 does not exist on disk, skipping restore", f.Path)
 		}
 		return RestoreInfo{}, fmt.Errorf("%s: stat failed before restore: %w", f.Path, err)
+	}
+
+	// Use job values when explicitly set; otherwise fall back to the current
+	// sparse file on disk so daemon-triggered restores also preserve metadata.
+	origUID := job.OrigUID
+	if origUID == 0 {
+		origUID = int(stat.Uid)
+	}
+	origGID := job.OrigGID
+	if origGID == 0 {
+		origGID = int(stat.Gid)
+	}
+	origMode := job.OrigMode
+	if origMode == 0 {
+		origMode = os.FileMode(stat.Mode) & os.ModePerm
 	}
 
 	// Resolve remote ID and autograph again inside worker.
@@ -289,18 +305,16 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 	}
 
 	// Preserve the original file's permissions on the temp file before rename.
-	if job.OrigMode != 0 {
-		if chmodErr := os.Chmod(tempPath, job.OrigMode); chmodErr != nil {
-			os.Remove(tempPath)
-			return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
-		}
+	if chmodErr := os.Chmod(tempPath, origMode); chmodErr != nil {
+		os.Remove(tempPath)
+		return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
 	}
 
 	// For allow-owner-mismatch, attempt to restore original owner before rename.
-	if cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch && (job.OrigUID != 0 || job.OrigGID != 0) {
-		if chownErr := os.Chown(tempPath, job.OrigUID, job.OrigGID); chownErr != nil {
+	if cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch {
+		if chownErr := os.Chown(tempPath, origUID, origGID); chownErr != nil {
 			// Log but do not fail the restore.
-			msg := fmt.Sprintf("%s: failed to restore original owner (%d:%d): %v", f.Path, job.OrigUID, job.OrigGID, chownErr)
+			msg := fmt.Sprintf("%s: failed to restore original owner (%d:%d): %v", f.Path, origUID, origGID, chownErr)
 			if cfg.Verbose {
 				fmt.Fprintln(os.Stderr, msg)
 			}

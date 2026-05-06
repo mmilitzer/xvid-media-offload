@@ -757,3 +757,74 @@ RewriteRule "^video.mp4" - [F,L,NC]
 		t.Errorf("expected restored mode 0750 (from disk), got %04o", fi.Mode().Perm())
 	}
 }
+
+// TestRestoreOnePreservesModeFromDiskWhenJobEmpty proves that even when a
+// Job is constructed without explicit OrigUID/OrigGID/OrigMode (as the daemon
+// does), restoreOne still preserves the sparse file's mode.
+func TestRestoreOnePreservesModeFromDiskWhenJobEmpty(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode restore tests")
+	}
+
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	markerDir := filepath.Join(scanRoot, "set1")
+	createMarker(t, markerDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createCredentialFile(t, scanRoot, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	path := filepath.Join(markerDir, "video.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0750)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: config.OwnershipPolicyAllowOwnerMismatch,
+		Verbose:         true,
+	}
+
+	job := Job{
+		File: scanner.FileInfo{
+			Path:       path,
+			RemoteID:   "669872d3d3586a56f9a3dfad",
+			Autograph:  1,
+			MarkerPath: filepath.Join(markerDir, ".htaccess"),
+			Size:       1024 * 1024,
+		},
+		Credentials: &credentials.Credentials{ClientID: "test-client", ClientSecret: "dGVzdC1zZWNyZXQ="},
+		// Intentionally leave OrigUID, OrigGID, OrigMode at zero to simulate
+		// the daemon path where these fields are not populated.
+	}
+
+	_, err = RestoreOne(context.Background(), job, cfg, nil, &sizedMockDownloader{size: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stat restored file: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected restored mode 0750 (from disk), got %04o", fi.Mode().Perm())
+	}
+}
