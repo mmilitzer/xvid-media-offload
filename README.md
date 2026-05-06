@@ -175,24 +175,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=myuser
-Group=myuser
-ExecStart=/home/myuser/bin/media-offload daemon --config /home/myuser/media-offload/config.yaml
+User=www-data
+Group=www-data
+ExecStart=/home/httpd/html/media-offload/bin/media-offload daemon --config /home/httpd/html/media-offload/config.yaml
 Restart=on-failure
 RestartSec=10
-
-# Capabilities
-# Preserving the original file modification time after hole punching requires
-# the process to either own the MP4 file or hold CAP_FOWNER. If the daemon
-# user is not the file owner but has group write access, add CAP_FOWNER here.
-AmbientCapabilities=CAP_FOWNER
-CapabilityBoundingSet=CAP_FOWNER
 
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/home/html/site_root/content /home/myuser/media-offload
+ReadWritePaths=/home/html/site_root/content /home/httpd/html/media-offload
 
 [Install]
 WantedBy=multi-user.target
@@ -200,13 +193,13 @@ WantedBy=multi-user.target
 
 Adjust `User`, `Group`, `ExecStart`, and `ReadWritePaths` to match the owner of your content directories and the location of your config and optional database.
 
-**Permission note:** Linux only allows a process to change the timestamps of a file it does not own if it has the `CAP_FOWNER` capability. Group write permission on the file is **not** sufficient. If the daemon runs as a user that is not the owner of the MP4 files but has group write access, you must grant `CAP_FOWNER` via the systemd unit (as shown above) or by setting the capability on the binary itself with `setcap cap_fowner=+ep /path/to/media-offload`. If `CAP_FOWNER` is missing, offloading still succeeds but the original modification time is lost and an error is logged.
+**Permission note:** The example above assumes the daemon runs as the same user that owns the MP4 files (e.g. `www-data`). This is the simplest and recommended setup because the file owner can always restore timestamps after hole punching. If you must run the daemon as a different user, be aware that Linux only allows a process to change the timestamps of a file it does not own if it has the `CAP_FOWNER` capability. Group write permission on the file is **not** sufficient. In that case you can grant `CAP_FOWNER` via `AmbientCapabilities=CAP_FOWNER` in the systemd unit, or by setting the capability on the binary with `setcap cap_fowner=+ep /path/to/media-offload`. If `CAP_FOWNER` is missing, offloading still succeeds but the original modification time is lost and an error is logged.
 
 Then create the configuration directory, place your `config.yaml` inside it, and start the service:
 
 ```bash
-mkdir -p ~/media-offload
-# edit ~/media-offload/config.yaml
+mkdir -p /home/httpd/html/media-offload
+# edit /home/httpd/html/media-offload/config.yaml
 
 systemctl daemon-reload
 systemctl enable --now media-offload
