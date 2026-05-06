@@ -608,6 +608,15 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	if len(res.Offloaded) != 1 {
 		t.Fatalf("expected 1 offloaded file, got %d", len(res.Offloaded))
 	}
+	if res.Errors != 0 {
+		t.Fatalf("expected 0 errors, got %d: %v", res.Errors, res.ErrorDetails)
+	}
+
+	// NOTE: Testing the permission-denied case (where the caller does not own
+	// the file and lacks CAP_FOWNER) is not practical in a standard Go test
+	// because it requires running as a different non-root user. The daemon logs
+	// such failures via ErrorDetails, and the README documents the CAP_FOWNER
+	// requirement for systemd deployments.
 
 	// Verify MP4 mtime is preserved.
 	fi, err := os.Stat(path)

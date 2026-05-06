@@ -353,17 +353,25 @@ func (d *Daemon) combinedScan() {
 	shrinkRes, err := shrink.RunFromAll(d.cfg, d.dryRun, d.database, all)
 	if err != nil {
 		log.Printf("shrink error: %v", err)
-	} else if !d.dryRun && len(shrinkRes.Offloaded) > 0 {
-		log.Printf("shrink offloaded %d files", len(shrinkRes.Offloaded))
-		// Register inotify watches for newly offloaded files immediately.
-		for _, o := range shrinkRes.Offloaded {
-			dir := filepath.Dir(o.Path)
-			if err := d.addInotifyWatch(dir); err != nil {
-				log.Printf("inotify watch error for newly offloaded %s: %v", dir, err)
+	} else {
+		if shrinkRes.Errors > 0 {
+			log.Printf("shrink encountered %d error(s)", shrinkRes.Errors)
+			for _, detail := range shrinkRes.ErrorDetails {
+				log.Printf("shrink error: %s", detail)
 			}
 		}
-	} else if d.dryRun && len(shrinkRes.Candidates) > 0 {
-		log.Printf("dry-run: would shrink %d files", len(shrinkRes.Candidates))
+		if !d.dryRun && len(shrinkRes.Offloaded) > 0 {
+			log.Printf("shrink offloaded %d files", len(shrinkRes.Offloaded))
+			// Register inotify watches for newly offloaded files immediately.
+			for _, o := range shrinkRes.Offloaded {
+				dir := filepath.Dir(o.Path)
+				if err := d.addInotifyWatch(dir); err != nil {
+					log.Printf("inotify watch error for newly offloaded %s: %v", dir, err)
+				}
+			}
+		} else if d.dryRun && len(shrinkRes.Candidates) > 0 {
+			log.Printf("dry-run: would shrink %d files", len(shrinkRes.Candidates))
+		}
 	}
 
 	// Restore candidates and inotify watches derived from the same ScanAll result.
