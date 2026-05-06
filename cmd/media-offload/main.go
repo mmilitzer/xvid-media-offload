@@ -18,17 +18,24 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/restore"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
 	"github.com/mmilitzer/xvid-media-offload/pkg/shrink"
+	"github.com/mmilitzer/xvid-media-offload/pkg/version"
 )
 
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: media-offload <command> [options]")
 		fmt.Fprintln(os.Stderr, "Commands:")
-		fmt.Fprintln(os.Stderr, "  scan    Scan for offload candidates")
-		fmt.Fprintln(os.Stderr, "  shrink  Offload eligible files by punching holes")
-		fmt.Fprintln(os.Stderr, "  restore Restore offloaded files from remote storage")
-		fmt.Fprintln(os.Stderr, "  daemon  Run continuous daemon with periodic scans and inotify")
+		fmt.Fprintln(os.Stderr, "  scan     Scan for offload candidates")
+		fmt.Fprintln(os.Stderr, "  shrink   Offload eligible files by punching holes")
+		fmt.Fprintln(os.Stderr, "  restore  Restore offloaded files from remote storage")
+		fmt.Fprintln(os.Stderr, "  daemon   Run continuous daemon with periodic scans and inotify")
+		fmt.Fprintln(os.Stderr, "  version  Print version information")
 		os.Exit(1)
+	}
+
+	if os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version" {
+		printVersion()
+		os.Exit(0)
 	}
 
 	command := os.Args[1]
@@ -45,6 +52,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		os.Exit(1)
 	}
+}
+
+func printVersion() {
+	fmt.Printf("media-offload %s\n", version.Version)
+	fmt.Printf("commit: %s\n", version.Commit)
+	fmt.Printf("built: %s\n", version.BuiltAt)
 }
 
 func runScan(args []string) int {

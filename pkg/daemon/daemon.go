@@ -21,6 +21,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/restore"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
 	"github.com/mmilitzer/xvid-media-offload/pkg/shrink"
+	"github.com/mmilitzer/xvid-media-offload/pkg/version"
 )
 
 // Daemon runs the media-offload service in continuous mode.
@@ -104,7 +105,7 @@ func (d *Daemon) Start() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	log.Println("daemon starting")
+	log.Printf("daemon starting — %s", version.String())
 
 	// Start restore workers FIRST so DB reconciliation and scans can enqueue.
 	for i := 0; i < d.cfg.RestoreWorkers; i++ {
