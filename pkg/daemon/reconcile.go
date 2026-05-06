@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/marker"
@@ -18,10 +19,42 @@ func (d *Daemon) reconcileDB() error {
 	}
 
 	for _, rec := range records {
+		if !pathUnderScanRoots(rec.LocalPath, d.cfg.ScanRoots) {
+			log.Printf("DB reconcile: skipping %s because it is outside active scan_roots", rec.LocalPath)
+			continue
+		}
 		d.reconcileRecord(rec)
 	}
 
 	return nil
+}
+
+// pathUnderScanRoots reports whether path is contained within any of the
+// configured scan roots using safe path comparison (not a naive string prefix
+// check). Both paths are cleaned and made absolute before comparison.
+func pathUnderScanRoots(path string, roots []string) bool {
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+
+	for _, root := range roots {
+		cleanRoot, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+
+		rel, err := filepath.Rel(cleanRoot, cleanPath)
+		if err != nil {
+			continue
+		}
+
+		if rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (d *Daemon) reconcileRecord(rec db.OffloadedRecord) {

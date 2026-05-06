@@ -870,6 +870,198 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 }
 
+func TestPathUnderScanRoots(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		roots  []string
+		want   bool
+	}{
+		{
+			name:  "path inside scan root",
+			path:  "/site/content/video.mp4",
+			roots: []string{"/site/content"},
+			want:  true,
+		},
+		{
+			name:  "path outside scan root",
+			path:  "/other/video.mp4",
+			roots: []string{"/site/content"},
+			want:  false,
+		},
+		{
+			name:  "sibling path prefix does not match",
+			path:  "/site/content2/video.mp4",
+			roots: []string{"/site/content"},
+			want:  false,
+		},
+		{
+			name:  "exact scan root path",
+			path:  "/site/content",
+			roots: []string{"/site/content"},
+			want:  true,
+		},
+		{
+			name:  "parent path does not match",
+			path:  "/site",
+			roots: []string{"/site/content"},
+			want:  false,
+		},
+		{
+			name:  "multiple roots second matches",
+			path:  "/site/b/video.mp4",
+			roots: []string{"/site/a", "/site/b"},
+			want:  true,
+		},
+		{
+			name:  "trailing slash in root",
+			path:  "/site/content/video.mp4",
+			roots: []string{"/site/content/"},
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pathUnderScanRoots(tt.path, tt.roots)
+			if got != tt.want {
+				t.Errorf("pathUnderScanRoots(%q, %v) = %v, want %v", tt.path, tt.roots, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReconcileDBSkipsPathsOutsideScanRoots(t *testing.T) {
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	outsideDir := filepath.Join(dir, "other")
+	siblingDir := filepath.Join(dir, "content2")
+
+	for _, d := range []string{scanRoot, outsideDir, siblingDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	insidePath := filepath.Join(scanRoot, "video.mp4")
+	outsidePath := filepath.Join(outsideDir, "video.mp4")
+	siblingPath := filepath.Join(siblingDir, "video.mp4")
+
+	// Insert records for all three files (none exist on disk).
+	for _, p := range []string{insidePath, outsidePath, siblingPath} {
+		if err := database.UpsertOffloadedFile(p, "remote-id", 1, 100, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, database, nil)
+	if err := d.reconcileDB(); err != nil {
+		t.Fatalf("reconcileDB failed: %v", err)
+	}
+
+	// Inside path: file is missing, so reconcileRecord should delete the DB row.
+	_, _, _, _, err = database.GetOffloadedFile(insidePath)
+	if err == nil {
+		t.Error("expected DB record for inside path to be removed because file is missing")
+	}
+
+	// Outside path: should be skipped, DB row must remain.
+	_, _, _, _, err = database.GetOffloadedFile(outsidePath)
+	if err != nil {
+		t.Errorf("expected DB record for outside path to be preserved, got error: %v", err)
+	}
+
+	// Sibling path: should be skipped, DB row must remain.
+	_, _, _, _, err = database.GetOffloadedFile(siblingPath)
+	if err != nil {
+		t.Errorf("expected DB record for sibling path to be preserved, got error: %v", err)
+	}
+
+	// No restore jobs should have been enqueued for outside or sibling paths.
+	d.inFlightMu.Lock()
+	if d.inFlight[outsidePath] {
+		t.Error("expected no restore job for outside path")
+	}
+	if d.inFlight[siblingPath] {
+		t.Error("expected no restore job for sibling path")
+	}
+	d.inFlightMu.Unlock()
+}
+
+func TestReconcileDBPreservesOffloadedMarkerOutsideScanRoots(t *testing.T) {
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	siblingDir := filepath.Join(dir, "content2")
+
+	for _, d := range []string{scanRoot, siblingDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening db: %v", err)
+	}
+	defer database.Close()
+
+	siblingPath := filepath.Join(siblingDir, "video.mp4")
+	createSparseFile(t, siblingPath)
+
+	// Create .offloaded marker.
+	if err := os.WriteFile(siblingPath+".offloaded", []byte("offloaded"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := database.UpsertOffloadedFile(siblingPath, "remote-id", 1, 100, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		RestoreWorkers:  1,
+		ScanInterval:    config.Duration(24 * time.Hour),
+	}
+
+	d := NewDaemon(cfg, false, database, nil)
+	if err := d.reconcileDB(); err != nil {
+		t.Fatalf("reconcileDB failed: %v", err)
+	}
+
+	// The .offloaded marker must NOT be removed.
+	if _, err := os.Stat(siblingPath + ".offloaded"); os.IsNotExist(err) {
+		t.Error("expected .offloaded marker to be preserved for path outside scan_roots")
+	}
+
+	// DB row must also remain.
+	_, _, _, _, err = database.GetOffloadedFile(siblingPath)
+	if err != nil {
+		t.Errorf("expected DB record to be preserved, got error: %v", err)
+	}
+}
+
 func createCredentialFile(t *testing.T, dir, clientID, clientSecret string) {
 	t.Helper()
 	content := fmt.Sprintf("[xvid]\nAPP_CLIENT_ID = \"%s\"\nAPP_CLIENT_SECRET = \"%s\"\n", clientID, clientSecret)
