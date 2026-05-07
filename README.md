@@ -84,6 +84,7 @@ minimum_age: "30d"
 | `download_timeout` | `6h` | Global HTTP timeout for downloading restored files. Long enough for large, slow downloads. |
 | `database_path` | *(none)* | Path to an optional SQLite database used as a fallback for remote file IDs and as an audit log. |
 | `lock_file` | *(next to config)* | Path to the advisory lock file that prevents the daemon and CLI commands from running simultaneously. |
+| `ownership_policy` | `require-daemon-owner` | Controls how the tool handles MP4 files not owned by the daemon user. See [Ownership policy](#ownership-policy) below. |
 
 ### Credentials
 
@@ -219,6 +220,30 @@ Because the daemon holds an advisory file lock, running a manual `shrink` or `re
 ```bash
 systemctl restart media-offload
 ```
+
+---
+
+## Ownership policy
+
+The `ownership_policy` setting controls how the tool handles MP4 files that are not owned by the user running the daemon. The default is `require-daemon-owner`, which is the safest and most predictable option.
+
+### `require-daemon-owner` (default)
+
+Only MP4 files owned by the current effective UID are candidates for offload. Files owned by another user are skipped with reason "owner mismatch". This is the recommended setting when the daemon runs as the same user that owns the content (e.g. `www-data`).
+
+### `allow-owner-mismatch`
+
+MP4 files not owned by the daemon user may still be offloaded if the process has sufficient write access. The existing hole-punch strategy is used, but mtime restoration failures are logged rather than treated as fatal errors. On restore, the tool attempts to `chown`/`chgrp` the file back to its original owner; if that fails, the error is logged but the restore still succeeds.
+
+This mode is useful when the daemon must run as a different user and you have granted `CAP_FOWNER` or similar privileges, but it accepts that owner and timestamps may not be fully preserved without those capabilities.
+
+### `replace-with-daemon-owned-sparse-copy`
+
+MP4 files not owned by the daemon user are replaced with a new sparse file owned by the daemon. The replacement preserves the original logical size, mode, mtime, and (where possible) group ownership. The replacement is performed atomically via a temporary file (`filename.mp4.sparse-tmp.`) so an interrupted operation can be recovered on the next scan.
+
+If a file is already owned by the daemon user, the normal hole-punch strategy is still used.
+
+**Warning:** The replace strategy changes file ownership. Make sure this is compatible with your CMS, FTP/SFTP access, and backup tools before enabling it.
 
 ---
 

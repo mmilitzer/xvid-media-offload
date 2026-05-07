@@ -2,9 +2,13 @@ package shrink
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/punch"
@@ -27,28 +31,31 @@ type OffloadInfo struct {
 
 // Result holds the outcome of a shrink run.
 type Result struct {
-	Candidates           []scanner.Candidate
-	Offloaded            []OffloadInfo
-	ManagedFolders       int
-	ValidMarkers         int
-	InvalidMarkers       int
-	SkippedOffloaded     int
-	SkippedSparse        int
-	SkippedTooYoung      int
-	SkippedMissingRemote int
-	SkippedTooSmall      int
-	SkippedNoAutograph   int
-	Errors               int
-	TotalCandidateSize   int64
-	BytesSaved           int64
-	SkippedDetails       []scanner.SkipInfo
-	ErrorDetails         []string
+	Candidates            []scanner.Candidate
+	Offloaded             []OffloadInfo
+	ManagedFolders        int
+	ValidMarkers          int
+	InvalidMarkers        int
+	SkippedOffloaded      int
+	SkippedSparse         int
+	SkippedTooYoung       int
+	SkippedMissingRemote  int
+	SkippedTooSmall       int
+	SkippedNoAutograph    int
+	SkippedOwnerMismatch  int
+	Errors                int
+	TotalCandidateSize    int64
+	BytesSaved            int64
+	SkippedDetails        []scanner.SkipInfo
+	ErrorDetails          []string
 }
 
 const offloadedMarkerContent = `This media file is stored on Xvid MediaHub cloud storage.
 The local file is still present for CMS compatibility but it has been truncated with most disk space freed.
 Delete this .offloaded file to initiate restoring the full local copy.
 `
+
+const sparseTmpSuffix = ".sparse-tmp."
 
 // Run scans for candidates and offloads them according to the configuration.
 // If dryRun is true, no files are modified.
@@ -103,6 +110,9 @@ func RunFromAll(cfg *config.Config, dryRun bool, database *db.DB, all *scanner.S
 			Autograph:  f.Autograph,
 			Glob:       f.Glob,
 			MarkerPath: f.MarkerPath,
+			UID:        f.UID,
+			GID:        f.GID,
+			Mode:       f.Mode,
 		})
 	}
 
@@ -181,6 +191,21 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 			continue
 		}
 
+		// Enforce require-daemon-owner in shrink path as well (covers RunFromAll).
+		if cfg.OwnershipPolicy == config.OwnershipPolicyRequireDaemonOwner {
+			if c.UID != os.Geteuid() {
+				res.SkippedOwnerMismatch++
+				if cfg.Verbose {
+					res.SkippedDetails = append(res.SkippedDetails, scanner.SkipInfo{
+						Path:       c.Path,
+						MarkerPath: c.MarkerPath,
+						Reason:     "owner mismatch",
+					})
+				}
+				continue
+			}
+		}
+
 		// File passes all shrink-specific checks — it is a real candidate.
 		res.Candidates = append(res.Candidates, c)
 		res.TotalCandidateSize += c.Size
@@ -201,11 +226,11 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 			continue
 		}
 
-		// Store original timestamps before hole punching.
+		// Store original timestamps before modification.
 		origAtime, origMtime, err := getFileTimestamps(c.Path)
 		if err != nil {
 			res.Errors++
-			msg := fmt.Sprintf("%s: stat before punch failed: %v", c.Path, err)
+			msg := fmt.Sprintf("%s: stat before offload failed: %v", c.Path, err)
 			res.ErrorDetails = append(res.ErrorDetails, msg)
 			if cfg.Verbose {
 				fmt.Fprintln(os.Stderr, msg)
@@ -213,98 +238,132 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 			continue
 		}
 
-		err = punch.PunchHole(c.Path, cfg.KeepPrefixBytes)
-		if err != nil {
-			res.Errors++
-			msg := fmt.Sprintf("%s: hole punch failed: %v", c.Path, err)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-			continue
-		}
+		ownedByDaemon := c.UID == os.Geteuid()
+		useReplace := cfg.OwnershipPolicy == config.OwnershipPolicyReplaceWithDaemonOwnedSparse && !ownedByDaemon
 
-		// Verify logical size is unchanged.
-		fi, err := os.Stat(c.Path)
-		if err != nil {
-			res.Errors++
-			msg := fmt.Sprintf("%s: stat after punch failed: %v", c.Path, err)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-			continue
-		}
-		if fi.Size() != c.Size {
-			res.Errors++
-			msg := fmt.Sprintf("%s: logical size changed after punch: %d != %d", c.Path, fi.Size(), c.Size)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-			continue
-		}
-
-		// Verify file is now sparse.
-		isSparseAfter, err := sparse.IsSparse(c.Path)
-		if err != nil {
-			res.Errors++
-			msg := fmt.Sprintf("%s: sparse check after punch failed: %v", c.Path, err)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-			continue
-		}
-		if !isSparseAfter {
-			res.Errors++
-			msg := fmt.Sprintf("%s: file not sparse after punch", c.Path)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-			continue
-		}
-
-		// Create .offloaded marker.
-		markerPath := c.Path + ".offloaded"
-		err = cfg.CreateOffloadedMarker(c.Path, markerPath, []byte(offloadedMarkerContent))
-		if err != nil {
-			res.Errors++
-			msg := fmt.Sprintf("%s: failed to create offloaded marker: %v", c.Path, err)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-			continue
-		}
-
-		// Restore original timestamps so the MP4 keeps its original modified time.
-		if err := os.Chtimes(c.Path, origAtime, origMtime); err != nil {
-			res.Errors++
-			msg := fmt.Sprintf("%s: failed to restore original timestamps: %v", c.Path, err)
-			res.ErrorDetails = append(res.ErrorDetails, msg)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-		} else {
-			// Verify mtime was actually restored (allow filesystem precision differences).
-			var restoredStat unix.Stat_t
-			if err := unix.Stat(c.Path, &restoredStat); err != nil {
+		var markerPath string
+		if useReplace {
+			markerPath, err = replaceFileWithSparseCopy(c, cfg, origAtime, origMtime)
+			if err != nil {
 				res.Errors++
-				msg := fmt.Sprintf("%s: unix stat after chtimes failed: %v", c.Path, err)
+				msg := fmt.Sprintf("%s: sparse replacement failed: %v", c.Path, err)
 				res.ErrorDetails = append(res.ErrorDetails, msg)
 				if cfg.Verbose {
 					fmt.Fprintln(os.Stderr, msg)
 				}
-			} else {
-				restoredMtime := time.Unix(restoredStat.Mtim.Sec, restoredStat.Mtim.Nsec)
-				if restoredMtime.Sub(origMtime).Abs() > time.Second {
-					res.Errors++
-					msg := fmt.Sprintf("%s: mtime not restored after offload: expected %v, got %v", c.Path, origMtime, restoredMtime)
+				continue
+			}
+		} else {
+			// Standard hole-punch strategy.
+			err = punch.PunchHole(c.Path, cfg.KeepPrefixBytes)
+			if err != nil {
+				res.Errors++
+				msg := fmt.Sprintf("%s: hole punch failed: %v", c.Path, err)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+
+			// Verify logical size is unchanged.
+			fi, err := os.Stat(c.Path)
+			if err != nil {
+				res.Errors++
+				msg := fmt.Sprintf("%s: stat after punch failed: %v", c.Path, err)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+			if fi.Size() != c.Size {
+				res.Errors++
+				msg := fmt.Sprintf("%s: logical size changed after punch: %d != %d", c.Path, fi.Size(), c.Size)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+
+			// Verify file is now sparse.
+			isSparseAfter, err := sparse.IsSparse(c.Path)
+			if err != nil {
+				res.Errors++
+				msg := fmt.Sprintf("%s: sparse check after punch failed: %v", c.Path, err)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+			if !isSparseAfter {
+				res.Errors++
+				msg := fmt.Sprintf("%s: file not sparse after punch", c.Path)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+
+			// Create .offloaded marker.
+			markerPath = c.Path + ".offloaded"
+			err = cfg.CreateOffloadedMarker(c.Path, markerPath, []byte(offloadedMarkerContent))
+			if err != nil {
+				res.Errors++
+				msg := fmt.Sprintf("%s: failed to create offloaded marker: %v", c.Path, err)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+
+			// Restore original timestamps so the MP4 keeps its original modified time.
+			if err := os.Chtimes(c.Path, origAtime, origMtime); err != nil {
+				allowMtimeFailure := cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch && !ownedByDaemon
+				msg := fmt.Sprintf("%s: failed to restore original timestamps: %v", c.Path, err)
+				if allowMtimeFailure {
 					res.ErrorDetails = append(res.ErrorDetails, msg)
 					if cfg.Verbose {
 						fmt.Fprintln(os.Stderr, msg)
+					}
+				} else {
+					res.Errors++
+					res.ErrorDetails = append(res.ErrorDetails, msg)
+					if cfg.Verbose {
+						fmt.Fprintln(os.Stderr, msg)
+					}
+				}
+			} else {
+				// Verify mtime was actually restored (allow filesystem precision differences).
+				var restoredStat unix.Stat_t
+				if err := unix.Stat(c.Path, &restoredStat); err != nil {
+					res.Errors++
+					msg := fmt.Sprintf("%s: unix stat after chtimes failed: %v", c.Path, err)
+					res.ErrorDetails = append(res.ErrorDetails, msg)
+					if cfg.Verbose {
+						fmt.Fprintln(os.Stderr, msg)
+					}
+				} else {
+					restoredMtime := time.Unix(restoredStat.Mtim.Sec, restoredStat.Mtim.Nsec)
+					if restoredMtime.Sub(origMtime).Abs() > time.Second {
+						allowMtimeFailure := cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch && !ownedByDaemon
+						msg := fmt.Sprintf("%s: mtime not restored after offload: expected %v, got %v", c.Path, origMtime, restoredMtime)
+						if allowMtimeFailure {
+							res.ErrorDetails = append(res.ErrorDetails, msg)
+							if cfg.Verbose {
+								fmt.Fprintln(os.Stderr, msg)
+							}
+						} else {
+							res.Errors++
+							res.ErrorDetails = append(res.ErrorDetails, msg)
+							if cfg.Verbose {
+								fmt.Fprintln(os.Stderr, msg)
+							}
+						}
 					}
 				}
 			}
@@ -342,4 +401,128 @@ func processCandidates(cfg *config.Config, dryRun bool, database *db.DB, candida
 	}
 
 	return res, nil
+}
+
+// replaceFileWithSparseCopy implements the replace-with-daemon-owned-sparse-copy
+// strategy for files not owned by the daemon user.
+func replaceFileWithSparseCopy(c scanner.Candidate, cfg *config.Config, origAtime, origMtime time.Time) (string, error) {
+	// 1. stat original MP4
+	var origStat unix.Stat_t
+	if err := unix.Stat(c.Path, &origStat); err != nil {
+		return "", fmt.Errorf("stat original file: %w", err)
+	}
+
+	// 2. reject non-regular files
+	if origStat.Mode&unix.S_IFREG == 0 {
+		return "", fmt.Errorf("original file is not a regular file")
+	}
+
+	// 3. reject hardlinked files with link count > 1
+	if origStat.Nlink > 1 {
+		return "", fmt.Errorf("hardlinked files with link count > 1 are not supported")
+	}
+
+	// 4. create temp sparse replacement with unique name
+	tempPath := c.Path + sparseTmpSuffix + uuid.NewString()
+	tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	defer func() {
+		if tempFile != nil {
+			tempFile.Close()
+		}
+	}()
+
+	// 5. copy only keep_prefix_bytes from original to temp
+	srcFile, err := os.Open(c.Path)
+	if err != nil {
+		return "", fmt.Errorf("open original file: %w", err)
+	}
+	_, err = io.CopyN(tempFile, srcFile, cfg.KeepPrefixBytes)
+	srcFile.Close()
+	if err != nil && err != io.EOF {
+		return "", fmt.Errorf("copy prefix to temp: %w", err)
+	}
+
+	// 6. ftruncate temp to original logical size
+	if err := tempFile.Truncate(c.Size); err != nil {
+		return "", fmt.Errorf("truncate temp to original size: %w", err)
+	}
+
+	// 7. chmod temp to original mode
+	if err := tempFile.Chmod(os.FileMode(origStat.Mode) & os.ModePerm); err != nil {
+		return "", fmt.Errorf("chmod temp file: %w", err)
+	}
+
+	// Close before rename.
+	if err := tempFile.Close(); err != nil {
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
+	tempFile = nil
+
+	// 8. attempt chgrp to maintain group ownership if appropriate, but do not require it
+	if c.GID != os.Getgid() {
+		if chownErr := os.Chown(tempPath, os.Getuid(), c.GID); chownErr != nil {
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "%s: failed to set group %d on sparse replacement: %v\n", c.Path, c.GID, chownErr)
+			}
+		}
+	}
+
+	// 9. restore original mtime on temp
+	if err := os.Chtimes(tempPath, origAtime, origMtime); err != nil {
+		return "", fmt.Errorf("restore original mtime on temp: %w", err)
+	}
+
+	// 10. fsync temp
+	f, err := os.Open(tempPath)
+	if err != nil {
+		return "", fmt.Errorf("open temp for fsync: %w", err)
+	}
+	if err := unix.Fsync(int(f.Fd())); err != nil {
+		f.Close()
+		return "", fmt.Errorf("fsync temp: %w", err)
+	}
+	f.Close()
+
+	// 11. atomically rename temp over original path
+	if err := os.Rename(tempPath, c.Path); err != nil {
+		return "", fmt.Errorf("atomic rename: %w", err)
+	}
+
+	// 12. fsync parent directory
+	dir := filepath.Dir(c.Path)
+	dirFile, err := os.Open(dir)
+	if err == nil {
+		unix.Fsync(int(dirFile.Fd()))
+		dirFile.Close()
+	}
+
+	// 13. create .offloaded marker
+	markerPath := c.Path + ".offloaded"
+	if err := cfg.CreateOffloadedMarker(c.Path, markerPath, []byte(offloadedMarkerContent)); err != nil {
+		return "", fmt.Errorf("create offloaded marker: %w", err)
+	}
+
+	return markerPath, nil
+}
+
+// CleanStaleSparseTmp removes stale sparse replacement temp files next to an MP4.
+// It looks in mp4Path's parent directory for entries matching
+// <basename>.sparse-tmp.* and deletes them.
+func CleanStaleSparseTmp(mp4Path string) {
+	dir := filepath.Dir(mp4Path)
+	base := filepath.Base(mp4Path)
+	prefix := base + sparseTmpSuffix
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }

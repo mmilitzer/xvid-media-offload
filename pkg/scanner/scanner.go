@@ -11,6 +11,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/marker"
 	"github.com/mmilitzer/xvid-media-offload/pkg/sparse"
+	"golang.org/x/sys/unix"
 )
 
 // FileInfo represents a managed MP4 file found during scanning.
@@ -27,6 +28,9 @@ type FileInfo struct {
 	ScanRoot           string
 	IsSparse           bool
 	HasOffloadedMarker bool
+	UID                int
+	GID                int
+	Mode               os.FileMode
 }
 
 // Candidate represents a file that is eligible for offloading.
@@ -41,6 +45,9 @@ type Candidate struct {
 	Autograph  int // -1 means not set, 0 or 1 means explicit value
 	Glob       string
 	MarkerPath string
+	UID        int
+	GID        int
+	Mode       os.FileMode
 }
 
 // SkipInfo records a file that was skipped during scanning.
@@ -52,17 +59,18 @@ type SkipInfo struct {
 
 // Result holds the outcome of a scan.
 type Result struct {
-	Candidates           []Candidate
-	ManagedFolders       int
-	ValidMarkers         int
-	InvalidMarkers       int
-	SkippedOffloaded     int
-	SkippedTooYoung      int
-	SkippedMissingRemote int
-	Errors               int
-	TotalCandidateSize   int64
-	SkippedDetails       []SkipInfo
-	ErrorDetails         []string
+	Candidates            []Candidate
+	ManagedFolders        int
+	ValidMarkers          int
+	InvalidMarkers        int
+	SkippedOffloaded      int
+	SkippedTooYoung       int
+	SkippedMissingRemote  int
+	SkippedOwnerMismatch  int
+	Errors                int
+	TotalCandidateSize    int64
+	SkippedDetails        []SkipInfo
+	ErrorDetails          []string
 }
 
 // ScanResult holds the outcome of a generalized scan.
@@ -137,6 +145,21 @@ func Scan(cfg *config.Config) (*Result, error) {
 			continue
 		}
 
+		// Skip files not owned by the daemon user when require-daemon-owner is active.
+		if cfg.OwnershipPolicy == config.OwnershipPolicyRequireDaemonOwner {
+			if f.UID != os.Geteuid() {
+				res.SkippedOwnerMismatch++
+				if cfg.Verbose {
+					res.SkippedDetails = append(res.SkippedDetails, SkipInfo{
+						Path:       f.Path,
+						MarkerPath: f.MarkerPath,
+						Reason:     "owner mismatch",
+					})
+				}
+				continue
+			}
+		}
+
 		res.Candidates = append(res.Candidates, Candidate{
 			Path:       f.Path,
 			RelPath:    f.RelPath,
@@ -147,6 +170,9 @@ func Scan(cfg *config.Config) (*Result, error) {
 			Autograph:  f.Autograph,
 			Glob:       f.Glob,
 			MarkerPath: f.MarkerPath,
+			UID:        f.UID,
+			GID:        f.GID,
+			Mode:       f.Mode,
 		})
 		res.TotalCandidateSize += f.Size
 	}
@@ -285,12 +311,17 @@ func scanRootAll(root string, cfg *config.Config, res *ScanResult) error {
 
 			absPath := filepath.Join(dirPath, filepath.FromSlash(relPath))
 
+			// Clean up any stale sparse replacement temp files next to this MP4.
+			cleanStaleSparseTmp(absPath)
+
 			fileInfo, err := os.Stat(absPath)
 			var size int64 = -1
 			var modTime time.Time
 			var age time.Duration
 			isSparse := false
 			hasOffloaded := false
+			var uid, gid int
+			var mode os.FileMode
 
 			if err == nil {
 				size = fileInfo.Size()
@@ -299,6 +330,13 @@ func scanRootAll(root string, cfg *config.Config, res *ScanResult) error {
 				isSparse, _ = sparse.IsSparse(absPath)
 				if _, err := os.Stat(absPath + ".offloaded"); err == nil {
 					hasOffloaded = true
+				}
+				mode = fileInfo.Mode()
+				// Use unix.Stat to get ownership info reliably.
+				var stat unix.Stat_t
+				if unixStatErr := unix.Stat(absPath, &stat); unixStatErr == nil {
+					uid = int(stat.Uid)
+					gid = int(stat.Gid)
 				}
 			}
 
@@ -321,6 +359,9 @@ func scanRootAll(root string, cfg *config.Config, res *ScanResult) error {
 				ScanRoot:           root,
 				IsSparse:           isSparse,
 				HasOffloadedMarker: hasOffloaded,
+				UID:                uid,
+				GID:                gid,
+				Mode:               mode,
 			})
 		}
 	}
@@ -362,6 +403,25 @@ func dirsAtDepth(root string, depth int) ([]string, error) {
 		dirs = append(dirs, subDirs...)
 	}
 	return dirs, nil
+}
+
+// cleanStaleSparseTmp removes stale sparse replacement temp files next to an MP4.
+// It looks in mp4Path's parent directory for entries matching
+// <basename>.sparse-tmp.* and deletes them.
+func cleanStaleSparseTmp(mp4Path string) {
+	dir := filepath.Dir(mp4Path)
+	base := filepath.Base(mp4Path)
+	prefix := base + ".sparse-tmp."
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // literalPathFromRegex extracts the literal relative path from an exact-match

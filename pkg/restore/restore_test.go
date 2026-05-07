@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
+	"github.com/mmilitzer/xvid-media-offload/pkg/credentials"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
+	"golang.org/x/sys/unix"
 )
 
 type mockDownloader struct {
@@ -35,6 +38,22 @@ func (m *mockDownloader) DownloadContext(ctx context.Context, signedURL string, 
 	}
 	// Write some content so size checks can pass.
 	return os.WriteFile(destPath, []byte("restored content"), 0644)
+}
+
+type sizedMockDownloader struct {
+	size int64
+}
+
+func (m *sizedMockDownloader) Download(signedURL string, destPath string) error {
+	return m.DownloadContext(context.Background(), signedURL, destPath)
+}
+
+func (m *sizedMockDownloader) DownloadContext(ctx context.Context, signedURL string, destPath string) error {
+	data := make([]byte, m.size)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	return os.WriteFile(destPath, data, 0644)
 }
 
 func TestRestoreDryRunDoesNotModify(t *testing.T) {
@@ -641,5 +660,446 @@ func createCredentialFile(t *testing.T, dir, clientID, clientSecret string) {
 	path := filepath.Join(dir, "cmsinclude.ini.php")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRestoreOneSkipsMissingSparseFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	// Do NOT create the actual MP4 file on disk.
+
+	job := Job{
+		File: scanner.FileInfo{
+			Path:       path,
+			RemoteID:   "669872d3d3586a56f9a3dfad",
+			Autograph:  1,
+			MarkerPath: filepath.Join(dir, ".htaccess"),
+			Size:       1024,
+		},
+		Credentials: &credentials.Credentials{ClientID: "id", ClientSecret: "secret"},
+	}
+
+	cfg := &config.Config{
+		ScanRoots:      []string{dir},
+		CandidateGlobs: []string{"**/*.mp4"},
+		MarkerFilename: ".htaccess",
+		MinimumAge:     config.Duration(1 * time.Hour),
+		Verbose:        true,
+	}
+
+	_, err := restoreOne(context.Background(), job, cfg, nil, &mockDownloader{})
+	if err == nil {
+		t.Fatal("expected error when sparse MP4 is missing")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("expected error to mention missing file, got: %v", err)
+	}
+}
+
+func TestRestoreUsesDiskOwnershipNotDB(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode restore tests")
+	}
+
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	markerDir := filepath.Join(scanRoot, "set1")
+	createMarker(t, markerDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createCredentialFile(t, scanRoot, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	path := filepath.Join(markerDir, "video.mp4")
+	// Create a genuinely sparse file.
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	// Set old mtime so it passes minimum_age, and a specific mode.
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0750)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: config.OwnershipPolicyAllowOwnerMismatch,
+		Verbose:         true,
+	}
+
+	// Use a mock downloader that writes the expected file size.
+	sizedDownloader := &sizedMockDownloader{size: 1024 * 1024}
+
+	res, err := Run(cfg, false, 1, nil, sizedDownloader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Restored) != 1 {
+		t.Fatalf("expected 1 restored file, got %d", len(res.Restored))
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stat restored file: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected restored mode 0750 (from disk), got %04o", fi.Mode().Perm())
+	}
+}
+
+// TestRestoreOnePreservesModeFromDiskWhenJobEmpty proves that even when a
+// Job is constructed without explicit OrigUID/OrigGID/OrigMode (as the daemon
+// does), restoreOne still preserves the sparse file's mode.
+func TestRestoreOnePreservesModeFromDiskWhenJobEmpty(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode restore tests")
+	}
+
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	markerDir := filepath.Join(scanRoot, "set1")
+	createMarker(t, markerDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createCredentialFile(t, scanRoot, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	path := filepath.Join(markerDir, "video.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0750)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: config.OwnershipPolicyAllowOwnerMismatch,
+		Verbose:         true,
+	}
+
+	job := Job{
+		File: scanner.FileInfo{
+			Path:       path,
+			RemoteID:   "669872d3d3586a56f9a3dfad",
+			Autograph:  1,
+			MarkerPath: filepath.Join(markerDir, ".htaccess"),
+			Size:       1024 * 1024,
+		},
+		Credentials: &credentials.Credentials{ClientID: "test-client", ClientSecret: "dGVzdC1zZWNyZXQ="},
+		// Intentionally leave OrigUID, OrigGID, OrigMode at zero to simulate
+		// the daemon path where these fields are not populated.
+	}
+
+	_, err = RestoreOne(context.Background(), job, cfg, nil, &sizedMockDownloader{size: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stat restored file: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected restored mode 0750 (from disk), got %04o", fi.Mode().Perm())
+	}
+}
+
+// TestRestoreOnePreservesGroupAndModeUnderRequireDaemonOwner verifies that
+// restoreOne preserves the group and mode of a daemon-owned sparse file when
+// the ownership_policy is require-daemon-owner.  This is the key case that
+// was previously broken: only allow-owner-mismatch attempted chown, so files
+// restored under require-daemon-owner or replace policies could lose their
+// original group.
+func TestRestoreOnePreservesGroupAndModeUnderRequireDaemonOwner(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode restore tests")
+	}
+
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	markerDir := filepath.Join(scanRoot, "set1")
+	createMarker(t, markerDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createCredentialFile(t, scanRoot, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	path := filepath.Join(markerDir, "video.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0750)
+
+	// Capture the current ownership of the sparse file (should be the daemon user).
+	var sparseStat unix.Stat_t
+	if err := unix.Stat(path, &sparseStat); err != nil {
+		t.Fatalf("stat sparse file: %v", err)
+	}
+	sparseGID := int(sparseStat.Gid)
+	sparseUID := int(sparseStat.Uid)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: config.OwnershipPolicyRequireDaemonOwner,
+		Verbose:         true,
+	}
+
+	job := Job{
+		File: scanner.FileInfo{
+			Path:       path,
+			RemoteID:   "669872d3d3586a56f9a3dfad",
+			Autograph:  1,
+			MarkerPath: filepath.Join(markerDir, ".htaccess"),
+			Size:       1024 * 1024,
+		},
+		Credentials: &credentials.Credentials{ClientID: "test-client", ClientSecret: "dGVzdC1zZWNyZXQ="},
+	}
+
+	_, err = RestoreOne(context.Background(), job, cfg, nil, &sizedMockDownloader{size: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify mode is preserved.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored file: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected restored mode 0750, got %04o", fi.Mode().Perm())
+	}
+
+	// Verify group is preserved.
+	var restoredStat unix.Stat_t
+	if err := unix.Stat(path, &restoredStat); err != nil {
+		t.Fatalf("stat restored file for ownership: %v", err)
+	}
+	if int(restoredStat.Gid) != sparseGID {
+		t.Errorf("expected restored GID %d (from sparse), got %d", sparseGID, restoredStat.Gid)
+	}
+	if int(restoredStat.Uid) != sparseUID {
+		t.Errorf("expected restored UID %d (from sparse), got %d", sparseUID, restoredStat.Uid)
+	}
+}
+
+// TestRestoreOnePreservesGroupAndModeUnderReplaceWithDaemonOwnedSparseCopy
+// verifies that restoreOne preserves group and mode under the
+// replace-with-daemon-owned-sparse-copy policy.
+func TestRestoreOnePreservesGroupAndModeUnderReplaceWithDaemonOwnedSparseCopy(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode restore tests")
+	}
+
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	markerDir := filepath.Join(scanRoot, "set1")
+	createMarker(t, markerDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createCredentialFile(t, scanRoot, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	path := filepath.Join(markerDir, "video.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0640)
+
+	var sparseStat unix.Stat_t
+	if err := unix.Stat(path, &sparseStat); err != nil {
+		t.Fatalf("stat sparse file: %v", err)
+	}
+	sparseGID := int(sparseStat.Gid)
+	sparseUID := int(sparseStat.Uid)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: config.OwnershipPolicyReplaceWithDaemonOwnedSparse,
+		Verbose:         true,
+	}
+
+	job := Job{
+		File: scanner.FileInfo{
+			Path:       path,
+			RemoteID:   "669872d3d3586a56f9a3dfad",
+			Autograph:  1,
+			MarkerPath: filepath.Join(markerDir, ".htaccess"),
+			Size:       1024 * 1024,
+		},
+		Credentials: &credentials.Credentials{ClientID: "test-client", ClientSecret: "dGVzdC1zZWNyZXQ="},
+	}
+
+	_, err = RestoreOne(context.Background(), job, cfg, nil, &sizedMockDownloader{size: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored file: %v", err)
+	}
+	if fi.Mode().Perm() != 0640 {
+		t.Errorf("expected restored mode 0640, got %04o", fi.Mode().Perm())
+	}
+
+	var restoredStat unix.Stat_t
+	if err := unix.Stat(path, &restoredStat); err != nil {
+		t.Fatalf("stat restored file for ownership: %v", err)
+	}
+	if int(restoredStat.Gid) != sparseGID {
+		t.Errorf("expected restored GID %d (from sparse), got %d", sparseGID, restoredStat.Gid)
+	}
+	if int(restoredStat.Uid) != sparseUID {
+		t.Errorf("expected restored UID %d (from sparse), got %d", sparseUID, restoredStat.Uid)
+	}
+}
+
+// TestRestoreOneSplitChownUnderAllowOwnerMismatch verifies that under
+// allow-owner-mismatch mode the restore uses split chown (group first,
+// then owner) so that partial preservation is possible.  When running as
+// a non-root user, group changes may succeed even if owner changes fail,
+// so the restored file should retain the daemon's uid but the original
+// gid if the chgrp succeeds.
+func TestRestoreOneSplitChownUnderAllowOwnerMismatch(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode restore tests")
+	}
+
+	dir := t.TempDir()
+	scanRoot := filepath.Join(dir, "content")
+	markerDir := filepath.Join(scanRoot, "set1")
+	createMarker(t, markerDir, `#Xvid AutoGraph content protection system.
+RewriteEngine on
+RewriteRule "^video.mp4" - [F,L,NC]
+#file_id=669872d3d3586a56f9a3dfad
+`)
+	createCredentialFile(t, scanRoot, "test-client", "dGVzdC1zZWNyZXQ=")
+
+	path := filepath.Join(markerDir, "video.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0750)
+
+	var sparseStat unix.Stat_t
+	if err := unix.Stat(path, &sparseStat); err != nil {
+		t.Fatalf("stat sparse file: %v", err)
+	}
+	sparseGID := int(sparseStat.Gid)
+	sparseUID := int(sparseStat.Uid)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{scanRoot},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1,
+		OwnershipPolicy: config.OwnershipPolicyAllowOwnerMismatch,
+		Verbose:         true,
+	}
+
+	job := Job{
+		File: scanner.FileInfo{
+			Path:       path,
+			RemoteID:   "669872d3d3586a56f9a3dfad",
+			Autograph:  1,
+			MarkerPath: filepath.Join(markerDir, ".htaccess"),
+			Size:       1024 * 1024,
+		},
+		Credentials: &credentials.Credentials{ClientID: "test-client", ClientSecret: "dGVzdC1zZWNyZXQ="},
+	}
+
+	_, err = RestoreOne(context.Background(), job, cfg, nil, &sizedMockDownloader{size: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Mode must always be preserved regardless of ownership policy.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored file: %v", err)
+	}
+	if fi.Mode().Perm() != 0750 {
+		t.Errorf("expected restored mode 0750, got %04o", fi.Mode().Perm())
+	}
+
+	// In allow-owner-mismatch mode, the file should be chowned to the
+	// original uid/gid if possible.  Since the test creates the file as
+	// the current user, the uid and gid should match after restore.
+	var restoredStat unix.Stat_t
+	if err := unix.Stat(path, &restoredStat); err != nil {
+		t.Fatalf("stat restored file for ownership: %v", err)
+	}
+	if int(restoredStat.Gid) != sparseGID {
+		t.Errorf("expected restored GID %d (from sparse), got %d", sparseGID, restoredStat.Gid)
+	}
+	if int(restoredStat.Uid) != sparseUID {
+		t.Errorf("expected restored UID %d (from sparse), got %d", sparseUID, restoredStat.Uid)
 	}
 }

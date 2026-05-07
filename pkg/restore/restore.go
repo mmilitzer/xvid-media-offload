@@ -49,6 +49,9 @@ type Result struct {
 type Job struct {
 	File        scanner.FileInfo
 	Credentials *credentials.Credentials
+	OrigUID     int
+	OrigGID     int
+	OrigMode    os.FileMode
 }
 
 // Run scans for restore candidates and restores them using a worker pool.
@@ -92,6 +95,32 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 			continue
 		}
 
+		// Stat the current sparse file to capture original ownership/mode from disk.
+		var origUID, origGID int
+		var origMode os.FileMode
+		var stat unix.Stat_t
+		if err := unix.Stat(f.Path, &stat); err != nil {
+			if os.IsNotExist(err) {
+				res.Errors++
+				msg := fmt.Sprintf("%s: sparse MP4 does not exist on disk, skipping restore", f.Path)
+				res.ErrorDetails = append(res.ErrorDetails, msg)
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				continue
+			}
+			res.Errors++
+			msg := fmt.Sprintf("%s: stat failed before restore: %v", f.Path, err)
+			res.ErrorDetails = append(res.ErrorDetails, msg)
+			if cfg.Verbose {
+				fmt.Fprintln(os.Stderr, msg)
+			}
+			continue
+		}
+		origUID = int(stat.Uid)
+		origGID = int(stat.Gid)
+		origMode = os.FileMode(stat.Mode) & os.ModePerm
+
 		if dryRun {
 			res.Queued++
 			continue
@@ -123,6 +152,9 @@ func Run(cfg *config.Config, dryRun bool, workers int, database *db.DB, download
 		jobs = append(jobs, Job{
 			File:        f,
 			Credentials: creds,
+			OrigUID:     origUID,
+			OrigGID:     origGID,
+			OrigMode:    origMode,
 		})
 		res.Queued++
 	}
@@ -171,6 +203,30 @@ func RestoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 
 func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.DB, downloader download.Downloader) (RestoreInfo, error) {
 	f := job.File
+
+	// Guard against missing sparse file and capture current ownership/mode from disk.
+	var stat unix.Stat_t
+	if err := unix.Stat(f.Path, &stat); err != nil {
+		if os.IsNotExist(err) {
+			return RestoreInfo{}, fmt.Errorf("%s: sparse MP4 does not exist on disk, skipping restore", f.Path)
+		}
+		return RestoreInfo{}, fmt.Errorf("%s: stat failed before restore: %w", f.Path, err)
+	}
+
+	// Use job values when explicitly set; otherwise fall back to the current
+	// sparse file on disk so daemon-triggered restores also preserve metadata.
+	origUID := job.OrigUID
+	if origUID == 0 {
+		origUID = int(stat.Uid)
+	}
+	origGID := job.OrigGID
+	if origGID == 0 {
+		origGID = int(stat.Gid)
+	}
+	origMode := job.OrigMode
+	if origMode == 0 {
+		origMode = os.FileMode(stat.Mode) & os.ModePerm
+	}
 
 	// Resolve remote ID and autograph again inside worker.
 	remoteID := f.RemoteID
@@ -249,10 +305,56 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 	}
 
 	// Preserve the original file's permissions on the temp file before rename.
-	if origInfo, statErr := os.Stat(f.Path); statErr == nil {
-		if chmodErr := os.Chmod(tempPath, origInfo.Mode()); chmodErr != nil {
+	if chmodErr := os.Chmod(tempPath, origMode); chmodErr != nil {
+		os.Remove(tempPath)
+		return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
+	}
+
+	// Attempt to preserve the captured uid/gid on the temp file for all
+	// ownership policies.  We split the chown into separate group and owner
+	// attempts so that partial preservation is possible (e.g. a non-root
+	// daemon can often change the group but not the owner).
+	var tempStat unix.Stat_t
+	if statErr := unix.Stat(tempPath, &tempStat); statErr != nil {
+		msg := fmt.Sprintf("%s: failed to stat temp file for ownership check: %v", f.Path, statErr)
+		if cfg.OwnershipPolicy == config.OwnershipPolicyRequireDaemonOwner {
 			os.Remove(tempPath)
-			return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
+			return RestoreInfo{}, fmt.Errorf("%s", msg)
+		}
+		if cfg.Verbose {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+	} else {
+		curUID := int(tempStat.Uid)
+		curGID := int(tempStat.Gid)
+		strictMode := cfg.OwnershipPolicy == config.OwnershipPolicyRequireDaemonOwner
+
+		// Attempt group preservation first: chown(-1, origGID).
+		if curGID != origGID {
+			if chownErr := os.Chown(tempPath, -1, origGID); chownErr != nil {
+				msg := fmt.Sprintf("%s: failed to restore original group (%d→%d): %v", f.Path, curGID, origGID, chownErr)
+				if strictMode {
+					os.Remove(tempPath)
+					return RestoreInfo{}, fmt.Errorf("%s", msg)
+				}
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+			}
+		}
+
+		// Attempt owner preservation: chown(origUID, -1).
+		if curUID != origUID {
+			if chownErr := os.Chown(tempPath, origUID, -1); chownErr != nil {
+				msg := fmt.Sprintf("%s: failed to restore original owner (%d→%d): %v", f.Path, curUID, origUID, chownErr)
+				if strictMode {
+					os.Remove(tempPath)
+					return RestoreInfo{}, fmt.Errorf("%s", msg)
+				}
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+			}
 		}
 	}
 

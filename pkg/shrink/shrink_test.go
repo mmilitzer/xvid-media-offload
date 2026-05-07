@@ -9,6 +9,7 @@ import (
 	"github.com/mmilitzer/xvid-media-offload/pkg/config"
 	"github.com/mmilitzer/xvid-media-offload/pkg/db"
 	"github.com/mmilitzer/xvid-media-offload/pkg/scanner"
+	"github.com/mmilitzer/xvid-media-offload/pkg/sparse"
 	"golang.org/x/sys/unix"
 )
 
@@ -376,6 +377,30 @@ func createOldFile(t *testing.T, path string) {
 	}
 }
 
+func createLargeOldFile(t *testing.T, path string) {
+	t.Helper()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 4*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	oldTime := time.Now().Add(-720 * time.Hour)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestShrinkApplyMarkerPermissionsSameAsSource(t *testing.T) {
 	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
 		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
@@ -659,5 +684,277 @@ RewriteRule "^4k/video.mp4" - [F,L,NC]
 	}
 	if !offloadedAt.After(beforeOffload.Add(-1 * time.Second)) {
 		t.Errorf("expected DB offloaded_at around offload time, got %v (before %v)", offloadedAt, beforeOffload)
+	}
+}
+
+func TestShrinkRequireDaemonOwnerSkipsNonOwned(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	createLargeOldFile(t, path)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+		OwnershipPolicy: config.OwnershipPolicyRequireDaemonOwner,
+	}
+
+	// Simulate a candidate whose UID does not match the current process.
+	all := &scanner.ScanResult{
+		Files: []scanner.FileInfo{
+			{
+				Path:       path,
+				RelPath:    "video.mp4",
+				Size:       4 * 1024 * 1024,
+				ModTime:    time.Now().Add(-720 * time.Hour),
+				Age:        720 * time.Hour,
+				RemoteID:   "remote-id",
+				Autograph:  1,
+				Glob:       "**/*.mp4",
+				MarkerPath: filepath.Join(dir, ".htaccess"),
+				UID:        os.Geteuid() + 9999, // different owner
+				GID:        os.Getgid(),
+				Mode:       0644,
+			},
+		},
+	}
+
+	res, err := RunFromAll(cfg, true, nil, all)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.SkippedOwnerMismatch != 1 {
+		t.Errorf("expected 1 owner mismatch skip, got %d", res.SkippedOwnerMismatch)
+	}
+	if len(res.Candidates) != 0 {
+		t.Errorf("expected 0 candidates, got %d", len(res.Candidates))
+	}
+}
+
+func TestShrinkAllowOwnerMismatchOffloadsNonOwned(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	createLargeOldFile(t, path)
+	oldTime := time.Date(2020, 1, 15, 10, 30, 0, 0, time.UTC)
+	os.Chtimes(path, oldTime, oldTime)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+		OwnershipPolicy: config.OwnershipPolicyAllowOwnerMismatch,
+	}
+
+	all := &scanner.ScanResult{
+		Files: []scanner.FileInfo{
+			{
+				Path:       path,
+				RelPath:    "video.mp4",
+				Size:       4 * 1024 * 1024,
+				ModTime:    oldTime,
+				Age:        720 * time.Hour,
+				RemoteID:   "remote-id",
+				Autograph:  1,
+				Glob:       "**/*.mp4",
+				MarkerPath: filepath.Join(dir, ".htaccess"),
+				UID:        os.Geteuid() + 9999, // different owner
+				GID:        os.Getgid(),
+				Mode:       0644,
+			},
+		},
+	}
+
+	res, err := RunFromAll(cfg, false, nil, all)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.SkippedOwnerMismatch != 0 {
+		t.Errorf("expected 0 owner mismatch skips, got %d", res.SkippedOwnerMismatch)
+	}
+	if len(res.Offloaded) != 1 {
+		t.Fatalf("expected 1 offloaded file, got %d", len(res.Offloaded))
+	}
+
+	// File should still be owned by current user (hole punch doesn't change owner).
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fi.Size() != 4*1024*1024 {
+		t.Errorf("expected logical size %d, got %d", 4*1024*1024, fi.Size())
+	}
+}
+
+func TestShrinkReplaceStrategyCreatesSparseCopy(t *testing.T) {
+	if os.Getenv("RUN_HOLE_PUNCH_TESTS") != "1" {
+		t.Skip("Set RUN_HOLE_PUNCH_TESTS=1 to run apply-mode shrink tests")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	createLargeOldFile(t, path)
+	oldTime := time.Date(2020, 1, 15, 10, 30, 0, 0, time.UTC)
+	os.Chtimes(path, oldTime, oldTime)
+	os.Chmod(path, 0640)
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+		OwnershipPolicy: config.OwnershipPolicyReplaceWithDaemonOwnedSparse,
+	}
+
+	all := &scanner.ScanResult{
+		Files: []scanner.FileInfo{
+			{
+				Path:       path,
+				RelPath:    "video.mp4",
+				Size:       4 * 1024 * 1024,
+				ModTime:    oldTime,
+				Age:        720 * time.Hour,
+				RemoteID:   "remote-id",
+				Autograph:  1,
+				Glob:       "**/*.mp4",
+				MarkerPath: filepath.Join(dir, ".htaccess"),
+				UID:        os.Geteuid() + 9999, // simulate non-owned
+				GID:        os.Getgid(),
+				Mode:       0640,
+			},
+		},
+	}
+
+	res, err := RunFromAll(cfg, false, nil, all)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Offloaded) != 1 {
+		t.Fatalf("expected 1 offloaded file, got %d", len(res.Offloaded))
+	}
+
+	// Verify logical size preserved.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fi.Size() != 4*1024*1024 {
+		t.Errorf("expected logical size %d, got %d", 4*1024*1024, fi.Size())
+	}
+
+	// Verify mtime preserved.
+	if !fi.ModTime().Equal(oldTime) {
+		t.Errorf("expected mtime %v, got %v", oldTime, fi.ModTime())
+	}
+
+	// Verify mode preserved.
+	if fi.Mode().Perm() != 0640 {
+		t.Errorf("expected mode 0640, got %04o", fi.Mode().Perm())
+	}
+
+	// Verify .offloaded marker exists.
+	if _, err := os.Stat(path + ".offloaded"); err != nil {
+		t.Errorf("expected .offloaded marker to exist: %v", err)
+	}
+
+	// Verify file is sparse (allocated should be much less than logical).
+	isSparse, err := sparse.IsSparse(path)
+	if err != nil {
+		t.Fatalf("unexpected error checking sparse: %v", err)
+	}
+	if !isSparse {
+		t.Errorf("expected replaced file to be sparse")
+	}
+}
+
+func TestShrinkReplaceStrategyCleansStaleTmp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	createLargeOldFile(t, path)
+	staleTmp := path + ".sparse-tmp.abc123"
+	if err := os.WriteFile(staleTmp, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		ScanRoots:       []string{dir},
+		CandidateGlobs:  []string{"**/*.mp4"},
+		MarkerFilename:  ".htaccess",
+		MinimumAge:      config.Duration(1 * time.Hour),
+		KeepPrefixBytes: 1024 * 1024,
+		OwnershipPolicy: config.OwnershipPolicyReplaceWithDaemonOwnedSparse,
+	}
+
+	all := &scanner.ScanResult{
+		Files: []scanner.FileInfo{
+			{
+				Path:       path,
+				RelPath:    "video.mp4",
+				Size:       4 * 1024 * 1024,
+				ModTime:    time.Now().Add(-720 * time.Hour),
+				Age:        720 * time.Hour,
+				RemoteID:   "remote-id",
+				Autograph:  1,
+				Glob:       "**/*.mp4",
+				MarkerPath: filepath.Join(dir, ".htaccess"),
+				UID:        os.Geteuid() + 9999,
+				GID:        os.Getgid(),
+				Mode:       0644,
+			},
+		},
+	}
+
+	_, err := RunFromAll(cfg, true, nil, all)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Stale tmp should still exist after dry-run (cleanup only happens during scan).
+	// We verify that CleanStaleSparseTmp works by calling it directly with the MP4 path.
+	CleanStaleSparseTmp(path)
+	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
+		t.Errorf("expected stale sparse-tmp to be deleted")
+	}
+}
+
+func TestCleanStaleSparseTmpDoesNotTouchUnrelatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	createLargeOldFile(t, path)
+
+	// Unrelated files that merely contain "sparse-tmp" in their name.
+	unrelated1 := filepath.Join(dir, "video.mp4.sparse-tmp-backup")
+	unrelated2 := filepath.Join(dir, "my-sparse-tmp-file.txt")
+	if err := os.WriteFile(unrelated1, []byte("backup"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrelated2, []byte("other"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real stale temp that should be removed.
+	staleTmp := path + ".sparse-tmp.stale-id"
+	if err := os.WriteFile(staleTmp, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	CleanStaleSparseTmp(path)
+
+	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
+		t.Errorf("expected stale sparse-tmp to be deleted")
+	}
+	if _, err := os.Stat(unrelated1); err != nil {
+		t.Errorf("expected unrelated backup file to be untouched: %v", err)
+	}
+	if _, err := os.Stat(unrelated2); err != nil {
+		t.Errorf("expected unrelated file to be untouched: %v", err)
 	}
 }
