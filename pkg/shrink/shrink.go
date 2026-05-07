@@ -463,7 +463,11 @@ func replaceFileWithSparseCopy(c scanner.Candidate, cfg *config.Config, origAtim
 
 	// 8. attempt chgrp to maintain group ownership if appropriate, but do not require it
 	if c.GID != os.Getgid() {
-		_ = os.Chown(tempPath, os.Getuid(), c.GID)
+		if chownErr := os.Chown(tempPath, os.Getuid(), c.GID); chownErr != nil {
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "%s: failed to set group %d on sparse replacement: %v\n", c.Path, c.GID, chownErr)
+			}
+		}
 	}
 
 	// 9. restore original mtime on temp
