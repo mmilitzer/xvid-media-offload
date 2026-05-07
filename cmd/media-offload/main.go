@@ -140,6 +140,7 @@ func printScanReport(res *scanner.Result, verbose bool) {
 	fmt.Printf("total candidate files size: %d\n", res.TotalCandidateSize)
 	fmt.Printf("skipped already offloaded:  %d\n", res.SkippedOffloaded)
 	fmt.Printf("skipped too young:          %d\n", res.SkippedTooYoung)
+	fmt.Printf("skipped owner mismatch:     %d\n", res.SkippedOwnerMismatch)
 	fmt.Printf("skipped file not found:     %d\n", res.SkippedMissingRemote)
 	fmt.Printf("errors:                     %d\n", res.Errors)
 
@@ -307,6 +308,7 @@ func printShrinkReport(res *shrink.Result, dryRun bool, verbose bool) {
 	fmt.Printf("skipped too young:          %d\n", res.SkippedTooYoung)
 	fmt.Printf("skipped too small:          %d\n", res.SkippedTooSmall)
 	fmt.Printf("skipped no autograph:       %d\n", res.SkippedNoAutograph)
+	fmt.Printf("skipped owner mismatch:     %d\n", res.SkippedOwnerMismatch)
 	fmt.Printf("skipped file not found:     %d\n", res.SkippedMissingRemote)
 	fmt.Printf("errors:                     %d\n", res.Errors)
 	fmt.Printf("total logical files size:   %d\n", res.TotalCandidateSize)

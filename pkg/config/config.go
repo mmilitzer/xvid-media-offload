@@ -39,8 +39,10 @@ type Config struct {
 	// permission bits of the source media file.  Any other value is parsed as
 	// an octal string (e.g. "0666") and applied literally.
 	MarkerFileMode string `yaml:"marker_file_mode"`
-	// OwnershipPolicy controls how the tool handles MP4 files that are not
-	// owned by the user running the daemon.
+	// OwnershipPolicy controls offload/shrink eligibility and the offload
+	// strategy for MP4 files that are not owned by the daemon user.
+	// Restore is independent of this setting and always uses best-effort
+	// metadata preservation.
 	//   require-daemon-owner           - only offload files owned by the daemon user (default)
 	//   allow-owner-mismatch           - allow offloading non-owned files with best-effort preservation
 	//   replace-with-daemon-owned-sparse-copy - replace non-owned files with a daemon-owned sparse copy

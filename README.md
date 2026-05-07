@@ -225,7 +225,9 @@ systemctl restart media-offload
 
 ## Ownership policy
 
-The `ownership_policy` setting controls how the tool handles MP4 files that are not owned by the user running the daemon. The default is `require-daemon-owner`, which is the safest and most predictable option.
+The `ownership_policy` setting controls **offload/shrink eligibility** and the offload strategy for MP4 files that are not owned by the user running the daemon. It does **not** affect restore behavior — restore always uses best-effort metadata preservation regardless of the policy (see [Restore behavior](#restore-behavior) below).
+
+The default is `require-daemon-owner`, which is the safest and most predictable option.
 
 ### `require-daemon-owner` (default)
 
@@ -233,7 +235,7 @@ Only MP4 files owned by the current effective UID are candidates for offload. Fi
 
 ### `allow-owner-mismatch`
 
-MP4 files not owned by the daemon user may still be offloaded if the process has sufficient write access. The existing hole-punch strategy is used, but mtime restoration failures are logged rather than treated as fatal errors. On restore, the tool attempts to `chown`/`chgrp` the file back to its original owner; if that fails, the error is logged but the restore still succeeds.
+MP4 files not owned by the daemon user may still be offloaded if the process has sufficient write access. The existing hole-punch strategy is used, but mtime restoration failures are logged rather than treated as fatal errors.
 
 This mode is useful when the daemon must run as a different user and you have granted `CAP_FOWNER` or similar privileges, but it accepts that owner and timestamps may not be fully preserved without those capabilities.
 
@@ -244,6 +246,16 @@ MP4 files not owned by the daemon user are replaced with a new sparse file owned
 If a file is already owned by the daemon user, the normal hole-punch strategy is still used.
 
 **Warning:** The replace strategy changes file ownership. Make sure this is compatible with your CMS, FTP/SFTP access, and backup tools before enabling it.
+
+### Restore behavior
+
+Restore is independent of `ownership_policy`. When a sparse file needs to be restored, the tool always attempts it as long as the remote ID is known, credentials are available, and there is enough disk space. Before replacing the sparse file, the tool captures its current uid/gid and mode, then applies them to the restored file on a best-effort basis:
+
+- `chmod` is applied to the temp file; failure is fatal (the restore is aborted).
+- `chown(-1, gid)` is attempted to preserve the group; failure is a warning, not a blocker.
+- `chown(uid, -1)` is attempted to preserve the owner; failure is a warning, not a blocker.
+
+If uid/gid preservation fails (e.g. the daemon lacks `CAP_CHOWN`), the restored file will be owned by the daemon user instead.
 
 ---
 
