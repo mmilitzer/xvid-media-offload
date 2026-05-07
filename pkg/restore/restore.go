@@ -310,13 +310,50 @@ func restoreOne(ctx context.Context, job Job, cfg *config.Config, database *db.D
 		return RestoreInfo{}, fmt.Errorf("chmod temp file: %w", chmodErr)
 	}
 
-	// For allow-owner-mismatch, attempt to restore original owner before rename.
-	if cfg.OwnershipPolicy == config.OwnershipPolicyAllowOwnerMismatch {
-		if chownErr := os.Chown(tempPath, origUID, origGID); chownErr != nil {
-			// Log but do not fail the restore.
-			msg := fmt.Sprintf("%s: failed to restore original owner (%d:%d): %v", f.Path, origUID, origGID, chownErr)
-			if cfg.Verbose {
-				fmt.Fprintln(os.Stderr, msg)
+	// Attempt to preserve the captured uid/gid on the temp file for all
+	// ownership policies.  We split the chown into separate group and owner
+	// attempts so that partial preservation is possible (e.g. a non-root
+	// daemon can often change the group but not the owner).
+	var tempStat unix.Stat_t
+	if statErr := unix.Stat(tempPath, &tempStat); statErr != nil {
+		msg := fmt.Sprintf("%s: failed to stat temp file for ownership check: %v", f.Path, statErr)
+		if cfg.OwnershipPolicy == config.OwnershipPolicyRequireDaemonOwner {
+			os.Remove(tempPath)
+			return RestoreInfo{}, fmt.Errorf("%s", msg)
+		}
+		if cfg.Verbose {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+	} else {
+		curUID := int(tempStat.Uid)
+		curGID := int(tempStat.Gid)
+		strictMode := cfg.OwnershipPolicy == config.OwnershipPolicyRequireDaemonOwner
+
+		// Attempt group preservation first: chown(-1, origGID).
+		if curGID != origGID {
+			if chownErr := os.Chown(tempPath, -1, origGID); chownErr != nil {
+				msg := fmt.Sprintf("%s: failed to restore original group (%d→%d): %v", f.Path, curGID, origGID, chownErr)
+				if strictMode {
+					os.Remove(tempPath)
+					return RestoreInfo{}, fmt.Errorf("%s", msg)
+				}
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+			}
+		}
+
+		// Attempt owner preservation: chown(origUID, -1).
+		if curUID != origUID {
+			if chownErr := os.Chown(tempPath, origUID, -1); chownErr != nil {
+				msg := fmt.Sprintf("%s: failed to restore original owner (%d→%d): %v", f.Path, curUID, origUID, chownErr)
+				if strictMode {
+					os.Remove(tempPath)
+					return RestoreInfo{}, fmt.Errorf("%s", msg)
+				}
+				if cfg.Verbose {
+					fmt.Fprintln(os.Stderr, msg)
+				}
 			}
 		}
 	}
