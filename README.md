@@ -184,9 +184,9 @@ RestartSec=10
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/home/html/site_root/content /home/httpd/html/media-offload
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/httpd/html
 
 [Install]
 WantedBy=multi-user.target
